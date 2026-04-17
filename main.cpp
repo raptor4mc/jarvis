@@ -124,7 +124,7 @@ int main() {
     cout << "Samples: " << samples.size() << endl;
 
     // Neural network: 3-word context -> 2 hidden layers -> vocab
-    const int H = 16; // hidden size
+    const int H = 64; // hidden size
     const int D = 12; // embedding size
 
     // Embedding table: vocab x D
@@ -160,7 +160,8 @@ int main() {
     }
 
     double lr = 0.05;
-    int epochs = 600;
+    const int epochs_if_loaded = 100;
+    const int epochs_if_fresh = 600;
     const string weights_file = "weights.bin";
 
     auto load_weights = [&](const string &filename) {
@@ -178,6 +179,75 @@ int main() {
         }
         in.read(reinterpret_cast<char*>(b1.data()), H * sizeof(double));
         if (!in) return false;
+
+        for (int i = 0; i < H; ++i) {
+            in.read(reinterpret_cast<char*>(W2[i].data()), H * sizeof(double));
+            if (!in) return false;
+        }
+        in.read(reinterpret_cast<char*>(b2.data()), H * sizeof(double));
+        if (!in) return false;
+
+        for (int i = 0; i < vocab; ++i) {
+            in.read(reinterpret_cast<char*>(W3[i].data()), H * sizeof(double));
+            if (!in) return false;
+        }
+        in.read(reinterpret_cast<char*>(b3.data()), vocab * sizeof(double));
+        if (!in) return false;
+
+        return true;
+    };
+
+    auto save_weights = [&](const string &filename) {
+        ofstream out(filename, ios::binary);
+        if (!out) return false;
+
+        for (int i = 0; i < vocab; ++i) out.write(reinterpret_cast<const char*>(E[i].data()), D * sizeof(double));
+        for (int i = 0; i < H; ++i) out.write(reinterpret_cast<const char*>(W1[i].data()), (3 * D) * sizeof(double));
+        out.write(reinterpret_cast<const char*>(b1.data()), H * sizeof(double));
+
+        for (int i = 0; i < H; ++i) out.write(reinterpret_cast<const char*>(W2[i].data()), H * sizeof(double));
+        out.write(reinterpret_cast<const char*>(b2.data()), H * sizeof(double));
+
+        for (int i = 0; i < vocab; ++i) out.write(reinterpret_cast<const char*>(W3[i].data()), H * sizeof(double));
+        out.write(reinterpret_cast<const char*>(b3.data()), vocab * sizeof(double));
+
+        return (bool)out;
+    };
+
+    bool loaded = load_weights(weights_file);
+    int epochs_to_train = loaded ? epochs_if_loaded : epochs_if_fresh;
+    if (loaded) {
+        cout << "Loaded weights from " << weights_file << ". Continuing training for "
+             << epochs_to_train << " epochs.\n";
+    } else {
+        cout << "No valid weights found. Training model for "
+             << epochs_to_train << " epochs from scratch...\n";
+    }
+
+    // Training
+    for (int ep = 0; ep < epochs_to_train; ++ep) {
+        double total_loss = 0.0;
+
+        for (int i = 0; i < vocab; ++i) {
+            in.read(reinterpret_cast<char*>(E[i].data()), D * sizeof(double));
+            if (!in) return false;
+        }
+
+            // Forward
+            vector<double> x(3 * D);
+            for (int d = 0; d < D; ++d) {
+                x[d] = E[w0][d];
+                x[D + d] = E[w1][d];
+                x[2 * D + d] = E[w2][d];
+            }
+
+            vector<double> z1(H), h1(H);
+            for (int i = 0; i < H; ++i) {
+                double z = b1[i];
+                for (int j = 0; j < 3 * D; ++j) z += W1[i][j] * x[j];
+                z1[i] = z;
+                h1[i] = fast_tanh(z);
+            }
 
         for (int i = 0; i < H; ++i) {
             in.read(reinterpret_cast<char*>(W2[i].data()), H * sizeof(double));
@@ -310,8 +380,19 @@ int main() {
                 }
             }
 
-            if (ep % 100 == 0) {
-                cout << "Epoch " << ep << " loss: " << total_loss << endl;
+            vector<double> dx(3 * D, 0.0);
+            for (int j = 0; j < H; ++j) {
+                for (int k = 0; k < 3 * D; ++k) {
+                    dx[k] += dz1[j] * W1[j][k];
+                    W1[j][k] -= lr * dz1[j] * x[k];
+                }
+                b1[j] -= lr * dz1[j];
+            }
+
+            for (int d = 0; d < D; ++d) {
+                E[w0][d] -= lr * dx[d];
+                E[w1][d] -= lr * dx[D + d];
+                E[w2][d] -= lr * dx[2 * D + d];
             }
         }
 
@@ -320,6 +401,12 @@ int main() {
         } else {
             cout << "Warning: failed to save weights to " << weights_file << ".\n";
         }
+    }
+
+    if (save_weights(weights_file)) {
+        cout << "Saved weights to " << weights_file << ".\n";
+    } else {
+        cout << "Warning: failed to save weights to " << weights_file << ".\n";
     }
 
     // Generation: given last 3 known words, predict continuation
