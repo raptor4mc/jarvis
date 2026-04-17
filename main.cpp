@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 
 using namespace std;
 
@@ -98,9 +99,13 @@ int main() {
 
     // Neural network: 3-word context -> 2 hidden layers -> vocab
     const int H = 16; // hidden size
+    const int D = 12; // embedding size
 
-    // First hidden layer: H x vocab (we sum embeddings for 3 words)
-    vector<vector<double>> W1(H, vector<double>(vocab));
+    // Embedding table: vocab x D
+    vector<vector<double>> E(vocab, vector<double>(D));
+
+    // First hidden layer: H x (3*D) for concatenated 3-word embeddings
+    vector<vector<double>> W1(H, vector<double>(3 * D));
     vector<double> b1(H, 0.0);
 
     // Second hidden layer: H x H
@@ -112,8 +117,11 @@ int main() {
     vector<double> b3(vocab, 0.0);
 
     // Init weights
+    for (int i = 0; i < vocab; ++i) {
+        for (int j = 0; j < D; ++j) E[i][j] = rand_weight();
+    }
     for (int i = 0; i < H; ++i) {
-        for (int j = 0; j < vocab; ++j) W1[i][j] = rand_weight();
+        for (int j = 0; j < 3 * D; ++j) W1[i][j] = rand_weight();
         b1[i] = 0.0;
     }
     for (int i = 0; i < H; ++i) {
@@ -127,87 +135,164 @@ int main() {
 
     double lr = 0.05;
     int epochs = 600;
+    const string weights_file = "weights.bin";
 
-    // Training
-    for (int ep = 0; ep < epochs; ++ep) {
-        double total_loss = 0.0;
+    auto load_weights = [&](const string &filename) {
+        ifstream in(filename, ios::binary);
+        if (!in) return false;
 
-        for (const auto &s : samples) {
-            int w0 = s.w0, w1 = s.w1, w2 = s.w2, t = s.target;
+        for (int i = 0; i < vocab; ++i) {
+            in.read(reinterpret_cast<char*>(E[i].data()), D * sizeof(double));
+            if (!in) return false;
+        }
 
-            // Forward
-            vector<double> z1(H), h1(H);
-            for (int i = 0; i < H; ++i) {
-                double z = b1[i];
-                z += W1[i][w0];
-                z += W1[i][w1];
-                z += W1[i][w2];
-                z1[i] = z;
-                h1[i] = fast_tanh(z);
-            }
+        for (int i = 0; i < H; ++i) {
+            in.read(reinterpret_cast<char*>(W1[i].data()), (3 * D) * sizeof(double));
+            if (!in) return false;
+        }
+        in.read(reinterpret_cast<char*>(b1.data()), H * sizeof(double));
+        if (!in) return false;
 
-            vector<double> z2(H), h2(H);
-            for (int i = 0; i < H; ++i) {
-                double z = b2[i];
-                for (int j = 0; j < H; ++j) z += W2[i][j] * h1[j];
-                z2[i] = z;
-                h2[i] = fast_tanh(z);
-            }
+        for (int i = 0; i < H; ++i) {
+            in.read(reinterpret_cast<char*>(W2[i].data()), H * sizeof(double));
+            if (!in) return false;
+        }
+        in.read(reinterpret_cast<char*>(b2.data()), H * sizeof(double));
+        if (!in) return false;
 
-            vector<double> z3(vocab);
-            for (int k = 0; k < vocab; ++k) {
-                double z = b3[k];
-                for (int j = 0; j < H; ++j) z += W3[k][j] * h2[j];
-                z3[k] = z;
-            }
+        for (int i = 0; i < vocab; ++i) {
+            in.read(reinterpret_cast<char*>(W3[i].data()), H * sizeof(double));
+            if (!in) return false;
+        }
+        in.read(reinterpret_cast<char*>(b3.data()), vocab * sizeof(double));
+        if (!in) return false;
 
-            vector<double> y = softmax(z3);
-            double loss = -log(y[t] + 1e-12);
-            total_loss += loss;
+        return true;
+    };
 
-            // Backprop
-            vector<double> dz3(vocab);
-            for (int k = 0; k < vocab; ++k) dz3[k] = y[k];
-            dz3[t] -= 1.0;
+    auto save_weights = [&](const string &filename) {
+        ofstream out(filename, ios::binary);
+        if (!out) return false;
 
-            vector<double> dh2(H, 0.0);
-            for (int k = 0; k < vocab; ++k) {
-                for (int j = 0; j < H; ++j) {
-                    dh2[j] += dz3[k] * W3[k][j];
-                    W3[k][j] -= lr * dz3[k] * h2[j];
+        for (int i = 0; i < vocab; ++i) out.write(reinterpret_cast<const char*>(E[i].data()), D * sizeof(double));
+        for (int i = 0; i < H; ++i) out.write(reinterpret_cast<const char*>(W1[i].data()), (3 * D) * sizeof(double));
+        out.write(reinterpret_cast<const char*>(b1.data()), H * sizeof(double));
+
+        for (int i = 0; i < H; ++i) out.write(reinterpret_cast<const char*>(W2[i].data()), H * sizeof(double));
+        out.write(reinterpret_cast<const char*>(b2.data()), H * sizeof(double));
+
+        for (int i = 0; i < vocab; ++i) out.write(reinterpret_cast<const char*>(W3[i].data()), H * sizeof(double));
+        out.write(reinterpret_cast<const char*>(b3.data()), vocab * sizeof(double));
+
+        return (bool)out;
+    };
+
+    bool loaded = load_weights(weights_file);
+    if (loaded) {
+        cout << "Loaded weights from " << weights_file << ". Skipping training.\n";
+    } else {
+        cout << "No valid weights found. Training model...\n";
+
+        // Training
+        for (int ep = 0; ep < epochs; ++ep) {
+            double total_loss = 0.0;
+
+            for (const auto &s : samples) {
+                int w0 = s.w0, w1 = s.w1, w2 = s.w2, t = s.target;
+
+                // Forward
+                vector<double> x(3 * D);
+                for (int d = 0; d < D; ++d) {
+                    x[d] = E[w0][d];
+                    x[D + d] = E[w1][d];
+                    x[2 * D + d] = E[w2][d];
                 }
-                b3[k] -= lr * dz3[k];
-            }
 
-            vector<double> dz2(H);
-            for (int j = 0; j < H; ++j) {
-                dz2[j] = dh2[j] * (1.0 - h2[j] * h2[j]);
-            }
-
-            vector<double> dh1(H, 0.0);
-            for (int i = 0; i < H; ++i) {
-                for (int j = 0; j < H; ++j) {
-                    dh1[j] += dz2[i] * W2[i][j];
-                    W2[i][j] -= lr * dz2[i] * h1[j];
+                vector<double> z1(H), h1(H);
+                for (int i = 0; i < H; ++i) {
+                    double z = b1[i];
+                    for (int j = 0; j < 3 * D; ++j) z += W1[i][j] * x[j];
+                    z1[i] = z;
+                    h1[i] = fast_tanh(z);
                 }
-                b2[i] -= lr * dz2[i];
+
+                vector<double> z2(H), h2(H);
+                for (int i = 0; i < H; ++i) {
+                    double z = b2[i];
+                    for (int j = 0; j < H; ++j) z += W2[i][j] * h1[j];
+                    z2[i] = z;
+                    h2[i] = fast_tanh(z);
+                }
+
+                vector<double> z3(vocab);
+                for (int k = 0; k < vocab; ++k) {
+                    double z = b3[k];
+                    for (int j = 0; j < H; ++j) z += W3[k][j] * h2[j];
+                    z3[k] = z;
+                }
+
+                vector<double> y = softmax(z3);
+                double loss = -log(y[t] + 1e-12);
+                total_loss += loss;
+
+                // Backprop
+                vector<double> dz3(vocab);
+                for (int k = 0; k < vocab; ++k) dz3[k] = y[k];
+                dz3[t] -= 1.0;
+
+                vector<double> dh2(H, 0.0);
+                for (int k = 0; k < vocab; ++k) {
+                    for (int j = 0; j < H; ++j) {
+                        dh2[j] += dz3[k] * W3[k][j];
+                        W3[k][j] -= lr * dz3[k] * h2[j];
+                    }
+                    b3[k] -= lr * dz3[k];
+                }
+
+                vector<double> dz2(H);
+                for (int j = 0; j < H; ++j) {
+                    dz2[j] = dh2[j] * (1.0 - h2[j] * h2[j]);
+                }
+
+                vector<double> dh1(H, 0.0);
+                for (int i = 0; i < H; ++i) {
+                    for (int j = 0; j < H; ++j) {
+                        dh1[j] += dz2[i] * W2[i][j];
+                        W2[i][j] -= lr * dz2[i] * h1[j];
+                    }
+                    b2[i] -= lr * dz2[i];
+                }
+
+                vector<double> dz1(H);
+                for (int j = 0; j < H; ++j) {
+                    dz1[j] = dh1[j] * (1.0 - h1[j] * h1[j]);
+                }
+
+                vector<double> dx(3 * D, 0.0);
+                for (int j = 0; j < H; ++j) {
+                    for (int k = 0; k < 3 * D; ++k) {
+                        dx[k] += dz1[j] * W1[j][k];
+                        W1[j][k] -= lr * dz1[j] * x[k];
+                    }
+                    b1[j] -= lr * dz1[j];
+                }
+
+                for (int d = 0; d < D; ++d) {
+                    E[w0][d] -= lr * dx[d];
+                    E[w1][d] -= lr * dx[D + d];
+                    E[w2][d] -= lr * dx[2 * D + d];
+                }
             }
 
-            vector<double> dz1(H);
-            for (int j = 0; j < H; ++j) {
-                dz1[j] = dh1[j] * (1.0 - h1[j] * h1[j]);
-            }
-
-            for (int j = 0; j < H; ++j) {
-                W1[j][w0] -= lr * dz1[j];
-                W1[j][w1] -= lr * dz1[j];
-                W1[j][w2] -= lr * dz1[j];
-                b1[j] -= lr * dz1[j];
+            if (ep % 100 == 0) {
+                cout << "Epoch " << ep << " loss: " << total_loss << endl;
             }
         }
 
-        if (ep % 100 == 0) {
-            cout << "Epoch " << ep << " loss: " << total_loss << endl;
+        if (save_weights(weights_file)) {
+            cout << "Saved weights to " << weights_file << ".\n";
+        } else {
+            cout << "Warning: failed to save weights to " << weights_file << ".\n";
         }
     }
 
@@ -225,12 +310,17 @@ int main() {
             int w1 = ctx[ctx.size()-2];
             int w2 = ctx[ctx.size()-1];
 
+            vector<double> x(3 * D);
+            for (int d = 0; d < D; ++d) {
+                x[d] = E[w0][d];
+                x[D + d] = E[w1][d];
+                x[2 * D + d] = E[w2][d];
+            }
+
             vector<double> z1(H), h1(H);
             for (int i = 0; i < H; ++i) {
                 double z = b1[i];
-                z += W1[i][w0];
-                z += W1[i][w1];
-                z += W1[i][w2];
+                for (int j = 0; j < 3 * D; ++j) z += W1[i][j] * x[j];
                 z1[i] = z;
                 h1[i] = fast_tanh(z);
             }
@@ -266,7 +356,7 @@ int main() {
         return out;
     };
 
-    cout << "\nTraining done. Chatbot ready.\n";
+    cout << "\nChatbot ready.\n";
     cout << "Type a message (using simple words like in the training text).\n";
     cout << "Type 'quit' to exit.\n\n";
 
