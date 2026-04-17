@@ -1,81 +1,19 @@
-#include <iostream>
-#include <vector>
-#include <string>
-#include <map>
-#include <cmath>
+#include "model.h"
+#include "tokenizer.h"
+
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <iostream>
 #include <sstream>
+#include <string>
+#include <vector>
 
 using namespace std;
-
-double rand_weight() {
-    return ((double)rand() / RAND_MAX - 0.5) / 5.0;
-}
-
-double fast_tanh(double x) {
-    return tanh(x);
-}
-
-vector<int> tokenize_bytes(const string &s) {
-    vector<int> tokens;
-    tokens.reserve(s.size());
-    for (unsigned char c : s) tokens.push_back((int)c);
-    return tokens;
-}
-
-string detokenize_bytes(const vector<int> &tokens) {
-    string out;
-    out.reserve(tokens.size());
-    for (int t : tokens) {
-        if (t >= 0 && t <= 255) out.push_back((char)t);
-    }
-    return out;
-}
-
-vector<double> softmax(const vector<double> &z) {
-    vector<double> y(z.size());
-    double maxv = z[0];
-    for (double v : z) if (v > maxv) maxv = v;
-    double sum = 0.0;
-    for (size_t i = 0; i < z.size(); ++i) {
-        y[i] = exp(z[i] - maxv);
-        sum += y[i];
-    }
-    for (size_t i = 0; i < z.size(); ++i) y[i] /= sum;
-    return y;
-}
-
-int sample_next_token(const vector<double> &logits, double temperature, bool deterministic) {
-    if (deterministic) {
-        int best = 0;
-        for (int i = 1; i < (int)logits.size(); ++i) {
-            if (logits[i] > logits[best]) best = i;
-        }
-        return best;
-    }
-
-    double temp = temperature;
-    if (temp < 1e-6) temp = 1e-6;
-
-    vector<double> scaled(logits.size());
-    for (size_t i = 0; i < logits.size(); ++i) scaled[i] = logits[i] / temp;
-    vector<double> y = softmax(scaled);
-
-    double r = (double)rand() / RAND_MAX;
-    double cum = 0.0;
-    for (int k = 0; k < (int)y.size(); ++k) {
-        cum += y[k];
-        if (r <= cum) return k;
-    }
-    return (int)y.size() - 1;
-}
 
 int main() {
     srand((unsigned)time(nullptr));
 
-    // Training text (self-contained + optional wikipedia snippet file)
     string text =
         "hello there i am an offline chatbot created to demonstrate how a small neural network can learn patterns from text "
         "i do not use the internet and i do not rely on external data everything i know is written inside this program "
@@ -98,114 +36,20 @@ int main() {
         cout << "Not enough training tokens.\n";
         return 0;
     }
-    int vocab = 256; // byte-level tokenizer vocabulary
-    cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
 
-    // Build training samples: 3-word context -> next word
-    struct Sample { int w0, w1, w2, target; };
-    vector<Sample> samples;
-    for (size_t i = 0; i + 3 < data.size(); ++i) {
-        Sample s;
-        s.w0 = data[i];
-        s.w1 = data[i+1];
-        s.w2 = data[i+2];
-        s.target = data[i+3];
-        samples.push_back(s);
-    }
-    cout << "Samples: " << samples.size() << endl;
-
-    // Neural network: 3-word context -> 2 hidden layers -> vocab
-    const int H = 64; // hidden size
-    const int D = 12; // embedding size
-
-    // Embedding table: vocab x D
-    vector<vector<double>> E(vocab, vector<double>(D));
-
-    // First hidden layer: H x (3*D) for concatenated 3-word embeddings
-    vector<vector<double>> W1(H, vector<double>(3 * D));
-    vector<double> b1(H, 0.0);
-
-    // Second hidden layer: H x H
-    vector<vector<double>> W2(H, vector<double>(H));
-    vector<double> b2(H, 0.0);
-
-    // Output layer: vocab x H
-    vector<vector<double>> W3(vocab, vector<double>(H));
-    vector<double> b3(vocab, 0.0);
-
-    // Init weights
-    for (int i = 0; i < vocab; ++i) {
-        for (int j = 0; j < D; ++j) E[i][j] = rand_weight();
-    }
-    for (int i = 0; i < H; ++i) {
-        for (int j = 0; j < 3 * D; ++j) W1[i][j] = rand_weight();
-        b1[i] = 0.0;
-    }
-    for (int i = 0; i < H; ++i) {
-        for (int j = 0; j < H; ++j) W2[i][j] = rand_weight();
-        b2[i] = 0.0;
-    }
-    for (int i = 0; i < vocab; ++i) {
-        for (int j = 0; j < H; ++j) W3[i][j] = rand_weight();
-        b3[i] = 0.0;
-    }
-
-    double lr = 0.05;
+    const int vocab = 256;
+    const int hidden_size = 64;
+    const int embedding_size = 12;
+    const double learning_rate = 0.05;
     const int epochs_if_loaded = 100;
     const int epochs_if_fresh = 600;
     const string weights_file = "weights.bin";
 
-    auto load_weights = [&](const string &filename) {
-        ifstream in(filename, ios::binary);
-        if (!in) return false;
+    cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
 
-        for (int i = 0; i < vocab; ++i) {
-            in.read(reinterpret_cast<char*>(E[i].data()), D * sizeof(double));
-            if (!in) return false;
-        }
+    ChatModel model(vocab, hidden_size, embedding_size);
 
-        for (int i = 0; i < H; ++i) {
-            in.read(reinterpret_cast<char*>(W1[i].data()), (3 * D) * sizeof(double));
-            if (!in) return false;
-        }
-        in.read(reinterpret_cast<char*>(b1.data()), H * sizeof(double));
-        if (!in) return false;
-
-        for (int i = 0; i < H; ++i) {
-            in.read(reinterpret_cast<char*>(W2[i].data()), H * sizeof(double));
-            if (!in) return false;
-        }
-        in.read(reinterpret_cast<char*>(b2.data()), H * sizeof(double));
-        if (!in) return false;
-
-        for (int i = 0; i < vocab; ++i) {
-            in.read(reinterpret_cast<char*>(W3[i].data()), H * sizeof(double));
-            if (!in) return false;
-        }
-        in.read(reinterpret_cast<char*>(b3.data()), vocab * sizeof(double));
-        if (!in) return false;
-
-        return true;
-    };
-
-    auto save_weights = [&](const string &filename) {
-        ofstream out(filename, ios::binary);
-        if (!out) return false;
-
-        for (int i = 0; i < vocab; ++i) out.write(reinterpret_cast<const char*>(E[i].data()), D * sizeof(double));
-        for (int i = 0; i < H; ++i) out.write(reinterpret_cast<const char*>(W1[i].data()), (3 * D) * sizeof(double));
-        out.write(reinterpret_cast<const char*>(b1.data()), H * sizeof(double));
-
-        for (int i = 0; i < H; ++i) out.write(reinterpret_cast<const char*>(W2[i].data()), H * sizeof(double));
-        out.write(reinterpret_cast<const char*>(b2.data()), H * sizeof(double));
-
-        for (int i = 0; i < vocab; ++i) out.write(reinterpret_cast<const char*>(W3[i].data()), H * sizeof(double));
-        out.write(reinterpret_cast<const char*>(b3.data()), vocab * sizeof(double));
-
-        return (bool)out;
-    };
-
-    bool loaded = load_weights(weights_file);
+    bool loaded = model.load_weights(weights_file);
     int epochs_to_train = loaded ? epochs_if_loaded : epochs_if_fresh;
     if (loaded) {
         cout << "Loaded weights from " << weights_file << ". Continuing training for "
@@ -215,159 +59,13 @@ int main() {
              << epochs_to_train << " epochs from scratch...\n";
     }
 
-    auto train_model = [&](int epochs) {
-        for (int ep = 0; ep < epochs; ++ep) {
-            double total_loss = 0.0;
+    model.train(data, epochs_to_train, learning_rate);
 
-            for (const auto &s : samples) {
-                int w0 = s.w0, w1 = s.w1, w2 = s.w2, t = s.target;
-
-                // Forward
-                vector<double> x(3 * D);
-                for (int d = 0; d < D; ++d) {
-                    x[d] = E[w0][d];
-                    x[D + d] = E[w1][d];
-                    x[2 * D + d] = E[w2][d];
-                }
-
-                vector<double> z1(H), h1(H);
-                for (int i = 0; i < H; ++i) {
-                    double z = b1[i];
-                    for (int j = 0; j < 3 * D; ++j) z += W1[i][j] * x[j];
-                    z1[i] = z;
-                    h1[i] = fast_tanh(z);
-                }
-
-                vector<double> z2(H), h2(H);
-                for (int i = 0; i < H; ++i) {
-                    double z = b2[i];
-                    for (int j = 0; j < H; ++j) z += W2[i][j] * h1[j];
-                    z2[i] = z;
-                    h2[i] = fast_tanh(z);
-                }
-
-                vector<double> z3(vocab);
-                for (int k = 0; k < vocab; ++k) {
-                    double z = b3[k];
-                    for (int j = 0; j < H; ++j) z += W3[k][j] * h2[j];
-                    z3[k] = z;
-                }
-
-                vector<double> y = softmax(z3);
-                double loss = -log(y[t] + 1e-12);
-                total_loss += loss;
-
-                // Backprop
-                vector<double> dz3(vocab);
-                for (int k = 0; k < vocab; ++k) dz3[k] = y[k];
-                dz3[t] -= 1.0;
-
-                vector<double> dh2(H, 0.0);
-                for (int k = 0; k < vocab; ++k) {
-                    for (int j = 0; j < H; ++j) {
-                        dh2[j] += dz3[k] * W3[k][j];
-                        W3[k][j] -= lr * dz3[k] * h2[j];
-                    }
-                    b3[k] -= lr * dz3[k];
-                }
-
-                vector<double> dz2(H);
-                for (int j = 0; j < H; ++j) {
-                    dz2[j] = dh2[j] * (1.0 - h2[j] * h2[j]);
-                }
-
-                vector<double> dh1(H, 0.0);
-                for (int i = 0; i < H; ++i) {
-                    for (int j = 0; j < H; ++j) {
-                        dh1[j] += dz2[i] * W2[i][j];
-                        W2[i][j] -= lr * dz2[i] * h1[j];
-                    }
-                    b2[i] -= lr * dz2[i];
-                }
-
-                vector<double> dz1(H);
-                for (int j = 0; j < H; ++j) {
-                    dz1[j] = dh1[j] * (1.0 - h1[j] * h1[j]);
-                }
-
-                vector<double> dx(3 * D, 0.0);
-                for (int j = 0; j < H; ++j) {
-                    for (int k = 0; k < 3 * D; ++k) {
-                        dx[k] += dz1[j] * W1[j][k];
-                        W1[j][k] -= lr * dz1[j] * x[k];
-                    }
-                    b1[j] -= lr * dz1[j];
-                }
-
-                for (int d = 0; d < D; ++d) {
-                    E[w0][d] -= lr * dx[d];
-                    E[w1][d] -= lr * dx[D + d];
-                    E[w2][d] -= lr * dx[2 * D + d];
-                }
-            }
-
-            if (ep % 100 == 0) {
-                cout << "Epoch " << ep << " loss: " << total_loss << endl;
-            }
-        }
-    };
-
-    train_model(epochs_to_train);
-
-    if (save_weights(weights_file)) {
+    if (model.save_weights(weights_file)) {
         cout << "Saved weights to " << weights_file << ".\n";
     } else {
         cout << "Warning: failed to save weights to " << weights_file << ".\n";
     }
-
-    // Generation: given last 3 known tokens, predict continuation
-    auto generate = [&](const vector<int> &context, int length, double temperature, bool deterministic) {
-        vector<int> ctx = context;
-        while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
-        vector<int> out_tokens = ctx;
-
-        for (int step = 0; step < length; ++step) {
-            int w0 = ctx[ctx.size()-3];
-            int w1 = ctx[ctx.size()-2];
-            int w2 = ctx[ctx.size()-1];
-
-            vector<double> x(3 * D);
-            for (int d = 0; d < D; ++d) {
-                x[d] = E[w0][d];
-                x[D + d] = E[w1][d];
-                x[2 * D + d] = E[w2][d];
-            }
-
-            vector<double> z1(H), h1(H);
-            for (int i = 0; i < H; ++i) {
-                double z = b1[i];
-                for (int j = 0; j < 3 * D; ++j) z += W1[i][j] * x[j];
-                z1[i] = z;
-                h1[i] = fast_tanh(z);
-            }
-
-            vector<double> z2(H), h2(H);
-            for (int i = 0; i < H; ++i) {
-                double z = b2[i];
-                for (int j = 0; j < H; ++j) z += W2[i][j] * h1[j];
-                z2[i] = z;
-                h2[i] = fast_tanh(z);
-            }
-
-            vector<double> z3(vocab);
-            for (int k = 0; k < vocab; ++k) {
-                double z = b3[k];
-                for (int j = 0; j < H; ++j) z += W3[k][j] * h2[j];
-                z3[k] = z;
-            }
-
-            int next_idx = sample_next_token(z3, temperature, deterministic);
-
-            ctx.push_back(next_idx);
-            out_tokens.push_back(next_idx);
-        }
-        return detokenize_bytes(out_tokens);
-    };
 
     cout << "\nChatbot ready.\n";
     cout << "Type a message.\n";
@@ -383,6 +81,7 @@ int main() {
         string line;
         if (!getline(cin, line)) break;
         if (line == "quit") break;
+
         if (line.rfind("/temp", 0) == 0) {
             istringstream iss(line);
             string cmd;
@@ -396,6 +95,7 @@ int main() {
             }
             continue;
         }
+
         if (line == "/det on") {
             deterministic = true;
             cout << "Bot: deterministic generation enabled\n";
@@ -412,7 +112,7 @@ int main() {
             while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
         }
 
-        string reply = generate(ctx, 15, temperature, deterministic);
+        string reply = model.generate(ctx, 15, temperature, deterministic);
         cout << "Bot: " << reply << "\n";
     }
 
