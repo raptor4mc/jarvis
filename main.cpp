@@ -214,6 +214,14 @@ int main() {
         return (bool)out;
     };
 
+    auto save_weights_with_log = [&](const string &filename) {
+        if (save_weights(filename)) {
+            cout << "Saved weights to " << filename << ".\n";
+        } else {
+            cout << "Warning: failed to save weights to " << filename << ".\n";
+        }
+    };
+
     bool loaded = load_weights(weights_file);
     int epochs_to_train = loaded ? epochs_if_loaded : epochs_if_fresh;
     if (loaded) {
@@ -318,28 +326,12 @@ int main() {
             if (ep % 100 == 0) {
                 cout << "Epoch " << ep << " loss: " << total_loss << endl;
             }
-
-            for (int d = 0; d < D; ++d) {
-                E[w0][d] -= lr * dx[d];
-                E[w1][d] -= lr * dx[D + d];
-                E[w2][d] -= lr * dx[2 * D + d];
-            }
         }
     };
 
     train_model(epochs_to_train);
 
-    if (save_weights(weights_file)) {
-        cout << "Saved weights to " << weights_file << ".\n";
-    } else {
-        cout << "Warning: failed to save weights to " << weights_file << ".\n";
-    }
-
-    if (save_weights(weights_file)) {
-        cout << "Saved weights to " << weights_file << ".\n";
-    } else {
-        cout << "Warning: failed to save weights to " << weights_file << ".\n";
-    }
+    save_weights_with_log(weights_file);
 
     // Generation: given last 3 known words, predict continuation
     auto generate = [&](const vector<int> &context, int length, double temperature, bool deterministic) {
