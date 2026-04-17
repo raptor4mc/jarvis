@@ -6,7 +6,8 @@
 
 class ChatModel {
 public:
-    ChatModel(int vocab, int hidden_size, int embedding_size);
+    // model_dim is Transformer width, seq_len is context length.
+    ChatModel(int vocab, int model_dim, int seq_len);
 
     bool load_weights(const std::string &filename);
     bool save_weights(const std::string &filename) const;
@@ -16,23 +17,32 @@ public:
 
 private:
     int vocab;
-    int H;
     int D;
+    int T;
+    int FF;
 
-    std::vector<std::vector<double>> E;
-    std::vector<std::vector<double>> W1;
-    std::vector<double> b1;
+    std::vector<std::vector<double>> token_emb; // vocab x D
+    std::vector<std::vector<double>> pos_emb;   // T x D
 
-    std::vector<std::vector<double>> W2;
-    std::vector<double> b2;
+    // Single-head self-attention block parameters.
+    std::vector<std::vector<double>> Wq, Wk, Wv, Wo; // D x D
 
-    std::vector<std::vector<double>> W3;
-    std::vector<double> b3;
+    // Feed-forward network parameters.
+    std::vector<std::vector<double>> Wff1; // FF x D
+    std::vector<double> bff1;              // FF
+    std::vector<std::vector<double>> Wff2; // D x FF
+    std::vector<double> bff2;              // D
+
+    // LM head.
+    std::vector<std::vector<double>> Wout; // vocab x D
+    std::vector<double> bout;              // vocab
 
     static double rand_weight();
-    static double fast_tanh(double x);
     static std::vector<double> softmax(const std::vector<double> &z);
     static int sample_next_token(const std::vector<double> &logits, double temperature, bool deterministic);
+
+    std::vector<double> forward_last_hidden(const std::vector<int> &tokens) const;
+    std::vector<int> normalize_context(const std::vector<int> &tokens) const;
 };
 
 #endif

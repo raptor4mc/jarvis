@@ -38,8 +38,8 @@ int main() {
     }
 
     const int vocab = 256;
-    const int hidden_size = 64;
-    const int embedding_size = 12;
+    const int model_dim = 64;
+    const int seq_len = 32;
     const double learning_rate = 0.05;
     const int epochs_if_loaded = 100;
     const int epochs_if_fresh = 600;
@@ -47,7 +47,7 @@ int main() {
 
     cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
 
-    ChatModel model(vocab, hidden_size, embedding_size);
+    ChatModel model(vocab, model_dim, seq_len);
 
     bool loaded = model.load_weights(weights_file);
     int epochs_to_train = loaded ? epochs_if_loaded : epochs_if_fresh;
