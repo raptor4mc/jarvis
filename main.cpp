@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <sstream>
 
 using namespace std;
 
@@ -45,6 +46,31 @@ vector<double> softmax(const vector<double> &z) {
     }
     for (size_t i = 0; i < z.size(); ++i) y[i] /= sum;
     return y;
+}
+
+int sample_next_token(const vector<double> &logits, double temperature, bool deterministic) {
+    if (deterministic) {
+        int best = 0;
+        for (int i = 1; i < (int)logits.size(); ++i) {
+            if (logits[i] > logits[best]) best = i;
+        }
+        return best;
+    }
+
+    double temp = temperature;
+    if (temp < 1e-6) temp = 1e-6;
+
+    vector<double> scaled(logits.size());
+    for (size_t i = 0; i < logits.size(); ++i) scaled[i] = logits[i] / temp;
+    vector<double> y = softmax(scaled);
+
+    double r = (double)rand() / RAND_MAX;
+    double cum = 0.0;
+    for (int k = 0; k < (int)y.size(); ++k) {
+        cum += y[k];
+        if (r <= cum) return k;
+    }
+    return (int)y.size() - 1;
 }
 
 int main() {
@@ -297,7 +323,7 @@ int main() {
     }
 
     // Generation: given last 3 known words, predict continuation
-    auto generate = [&](const vector<int> &context, int length) {
+    auto generate = [&](const vector<int> &context, int length, double temperature, bool deterministic) {
         vector<int> ctx = context;
         while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
         string out;
@@ -340,15 +366,7 @@ int main() {
                 z3[k] = z;
             }
 
-            vector<double> y = softmax(z3);
-
-            double r = (double)rand() / RAND_MAX;
-            double cum = 0.0;
-            int next_idx = 0;
-            for (int k = 0; k < vocab; ++k) {
-                cum += y[k];
-                if (r <= cum) { next_idx = k; break; }
-            }
+            int next_idx = sample_next_token(z3, temperature, deterministic);
 
             ctx.push_back(next_idx);
             out += itos[next_idx] + " ";
@@ -358,13 +376,41 @@ int main() {
 
     cout << "\nChatbot ready.\n";
     cout << "Type a message (using simple words like in the training text).\n";
+    cout << "Use /temp <value> to control randomness (example: /temp 0.7).\n";
+    cout << "Use /det on or /det off for deterministic generation.\n";
     cout << "Type 'quit' to exit.\n\n";
+
+    double temperature = 1.0;
+    bool deterministic = false;
 
     while (true) {
         cout << "You: ";
         string line;
         if (!getline(cin, line)) break;
         if (line == "quit") break;
+        if (line.rfind("/temp", 0) == 0) {
+            istringstream iss(line);
+            string cmd;
+            double t;
+            iss >> cmd >> t;
+            if (iss && t > 0.0) {
+                temperature = t;
+                cout << "Bot: temperature set to " << temperature << "\n";
+            } else {
+                cout << "Bot: invalid temperature. use /temp <positive number>\n";
+            }
+            continue;
+        }
+        if (line == "/det on") {
+            deterministic = true;
+            cout << "Bot: deterministic generation enabled\n";
+            continue;
+        }
+        if (line == "/det off") {
+            deterministic = false;
+            cout << "Bot: deterministic generation disabled\n";
+            continue;
+        }
 
         vector<string> in_words = split_words(line);
         vector<int> ctx;
@@ -380,7 +426,7 @@ int main() {
             while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
         }
 
-        string reply = generate(ctx, 15);
+        string reply = generate(ctx, 15, temperature, deterministic);
         cout << "Bot: " << reply << "\n";
     }
 
