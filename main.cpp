@@ -41,8 +41,8 @@ int main() {
     const int model_dim = 64;
     const int seq_len = 32;
     const double learning_rate = 0.05;
-    const int epochs_if_loaded = 100;
-    const int epochs_if_fresh = 600;
+    const int epochs_if_loaded = 10;
+    const int epochs_if_fresh = 50;
     const string weights_file = "weights.bin";
 
     cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
@@ -108,9 +108,7 @@ int main() {
         }
 
         vector<int> ctx = tokenize_bytes(line);
-        if (ctx.size() < 3) {
-            while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
-        }
+        if (ctx.empty()) ctx.push_back(0);
 
         string reply = model.generate(ctx, 15, temperature, deterministic);
         cout << "Bot: " << reply << "\n";

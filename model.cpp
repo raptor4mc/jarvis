@@ -313,9 +313,6 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
         samples.push_back({ctx, target});
     }
 
-    const size_t max_samples = 8;
-    if (samples.size() > max_samples) samples.resize(max_samples);
-
     cout << "Samples: " << samples.size() << endl;
 
     for (int ep = 0; ep < epochs; ++ep) {
