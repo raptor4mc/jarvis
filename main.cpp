@@ -318,10 +318,22 @@ int main() {
             if (ep % 100 == 0) {
                 cout << "Epoch " << ep << " loss: " << total_loss << endl;
             }
+
+            for (int d = 0; d < D; ++d) {
+                E[w0][d] -= lr * dx[d];
+                E[w1][d] -= lr * dx[D + d];
+                E[w2][d] -= lr * dx[2 * D + d];
+            }
         }
     };
 
     train_model(epochs_to_train);
+
+    if (save_weights(weights_file)) {
+        cout << "Saved weights to " << weights_file << ".\n";
+    } else {
+        cout << "Warning: failed to save weights to " << weights_file << ".\n";
+    }
 
     if (save_weights(weights_file)) {
         cout << "Saved weights to " << weights_file << ".\n";
