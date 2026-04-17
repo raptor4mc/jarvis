@@ -33,6 +33,10 @@ private:
     std::vector<std::vector<double>> Wff2; // D x FF
     std::vector<double> bff2;              // D
 
+    // LayerNorm parameters (post-attention and post-FFN).
+    std::vector<double> ln1_gamma, ln1_beta; // D
+    std::vector<double> ln2_gamma, ln2_beta; // D
+
     // LM head.
     std::vector<std::vector<double>> Wout; // vocab x D
     std::vector<double> bout;              // vocab
@@ -40,6 +44,13 @@ private:
     static double rand_weight();
     static std::vector<double> softmax(const std::vector<double> &z);
     static int sample_next_token(const std::vector<double> &logits, double temperature, bool deterministic);
+    static std::vector<double> layer_norm_forward(const std::vector<double> &x, const std::vector<double> &gamma, const std::vector<double> &beta);
+    static std::vector<double> layer_norm_backward(
+        const std::vector<double> &x,
+        const std::vector<double> &gamma,
+        const std::vector<double> &dout,
+        std::vector<double> &dgamma,
+        std::vector<double> &dbeta);
 
     std::vector<double> forward_last_hidden(const std::vector<int> &tokens) const;
     std::vector<int> normalize_context(const std::vector<int> &tokens) const;

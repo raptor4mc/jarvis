@@ -15,6 +15,8 @@ ChatModel::ChatModel(int vocab_size, int model_dim, int seq_len)
       Wq(D, vector<double>(D)), Wk(D, vector<double>(D)), Wv(D, vector<double>(D)), Wo(D, vector<double>(D)),
       Wff1(FF, vector<double>(D)), bff1(FF, 0.0),
       Wff2(D, vector<double>(FF)), bff2(D, 0.0),
+      ln1_gamma(D, 1.0), ln1_beta(D, 0.0),
+      ln2_gamma(D, 1.0), ln2_beta(D, 0.0),
       Wout(vocab, vector<double>(D)), bout(vocab, 0.0) {
     for (int i = 0; i < vocab; ++i) {
         for (int j = 0; j < D; ++j) token_emb[i][j] = rand_weight();
@@ -71,6 +73,70 @@ int ChatModel::sample_next_token(const vector<double> &logits, double temperatur
         if (r <= cum) return k;
     }
     return (int)y.size() - 1;
+}
+
+vector<double> ChatModel::layer_norm_forward(const vector<double> &x, const vector<double> &gamma, const vector<double> &beta) {
+    const double eps = 1e-5;
+    double mean = 0.0;
+    for (double v : x) mean += v;
+    mean /= (double)x.size();
+
+    double var = 0.0;
+    for (double v : x) {
+        double d = v - mean;
+        var += d * d;
+    }
+    var /= (double)x.size();
+    double inv_std = 1.0 / sqrt(var + eps);
+
+    vector<double> y(x.size());
+    for (size_t i = 0; i < x.size(); ++i) {
+        double xhat = (x[i] - mean) * inv_std;
+        y[i] = gamma[i] * xhat + beta[i];
+    }
+    return y;
+}
+
+vector<double> ChatModel::layer_norm_backward(
+    const vector<double> &x,
+    const vector<double> &gamma,
+    const vector<double> &dout,
+    vector<double> &dgamma,
+    vector<double> &dbeta) {
+    const double eps = 1e-5;
+    int n = (int)x.size();
+
+    double mean = 0.0;
+    for (double v : x) mean += v;
+    mean /= (double)n;
+
+    double var = 0.0;
+    for (double v : x) {
+        double d = v - mean;
+        var += d * d;
+    }
+    var /= (double)n;
+    double inv_std = 1.0 / sqrt(var + eps);
+
+    vector<double> xhat(n), dxhat(n);
+    for (int i = 0; i < n; ++i) {
+        xhat[i] = (x[i] - mean) * inv_std;
+        dgamma[i] += dout[i] * xhat[i];
+        dbeta[i] += dout[i];
+        dxhat[i] = dout[i] * gamma[i];
+    }
+
+    double sum_dxhat = 0.0, sum_dxhat_xhat = 0.0;
+    for (int i = 0; i < n; ++i) {
+        sum_dxhat += dxhat[i];
+        sum_dxhat_xhat += dxhat[i] * xhat[i];
+    }
+
+    vector<double> dx(n);
+    for (int i = 0; i < n; ++i) {
+        dx[i] = (1.0 / n) * inv_std * (n * dxhat[i] - sum_dxhat - xhat[i] * sum_dxhat_xhat);
+    }
+    return dx;
 }
 
 vector<int> ChatModel::normalize_context(const vector<int> &tokens) const {
@@ -139,13 +205,15 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
         }
     }
 
-    // Residual after attention.
+    // Residual + LayerNorm after attention.
     vector<vector<double>> h1(T, vector<double>(D));
     for (int t = 0; t < T; ++t) {
-        for (int d = 0; d < D; ++d) h1[t][d] = x[t][d] + attn_out[t][d];
+        vector<double> pre(D);
+        for (int d = 0; d < D; ++d) pre[d] = x[t][d] + attn_out[t][d];
+        h1[t] = layer_norm_forward(pre, ln1_gamma, ln1_beta);
     }
 
-    // FFN + residual.
+    // FFN + residual + LayerNorm.
     vector<vector<double>> h2(T, vector<double>(D));
     for (int t = 0; t < T; ++t) {
         vector<double> ff(FF, 0.0);
@@ -160,6 +228,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
             for (int j = 0; j < FF; ++j) z += Wff2[i][j] * ff[j];
             h2[t][i] = h1[t][i] + z;
         }
+        h2[t] = layer_norm_forward(h2[t], ln2_gamma, ln2_beta);
     }
 
     return h2[T - 1];
@@ -191,6 +260,10 @@ bool ChatModel::load_weights(const string &filename) {
     if (!read_vec(bff1)) return false;
     if (!read_mat(Wff2)) return false;
     if (!read_vec(bff2)) return false;
+    if (!read_vec(ln1_gamma)) return false;
+    if (!read_vec(ln1_beta)) return false;
+    if (!read_vec(ln2_gamma)) return false;
+    if (!read_vec(ln2_beta)) return false;
     if (!read_mat(Wout)) return false;
     if (!read_vec(bout)) return false;
 
@@ -218,6 +291,10 @@ bool ChatModel::save_weights(const string &filename) const {
     write_vec(bff1);
     write_mat(Wff2);
     write_vec(bff2);
+    write_vec(ln1_gamma);
+    write_vec(ln1_beta);
+    write_vec(ln2_gamma);
+    write_vec(ln2_beta);
     write_mat(Wout);
     write_vec(bout);
 
@@ -293,13 +370,14 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
                 for (int j = 0; j < D; ++j) attn_out[i] += Wo[i][j] * head[j];
             }
 
-            vector<double> h1_last(D);
-            for (int d = 0; d < D; ++d) h1_last[d] = x[last][d] + attn_out[d];
+            vector<double> pre1(D);
+            for (int d = 0; d < D; ++d) pre1[d] = x[last][d] + attn_out[d];
+            vector<double> h1_norm = layer_norm_forward(pre1, ln1_gamma, ln1_beta);
 
             vector<double> ff_pre(FF), ff(FF);
             for (int i = 0; i < FF; ++i) {
                 double z = bff1[i];
-                for (int j = 0; j < D; ++j) z += Wff1[i][j] * h1_last[j];
+                for (int j = 0; j < D; ++j) z += Wff1[i][j] * h1_norm[j];
                 ff_pre[i] = z;
                 ff[i] = z > 0.0 ? z : 0.0;
             }
@@ -311,13 +389,14 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
                 ff2[i] = z;
             }
 
-            vector<double> h2_last(D);
-            for (int d = 0; d < D; ++d) h2_last[d] = h1_last[d] + ff2[d];
+            vector<double> pre2(D);
+            for (int d = 0; d < D; ++d) pre2[d] = h1_norm[d] + ff2[d];
+            vector<double> h2_norm = layer_norm_forward(pre2, ln2_gamma, ln2_beta);
 
             vector<double> logits(vocab);
             for (int k = 0; k < vocab; ++k) {
                 double z = bout[k];
-                for (int j = 0; j < D; ++j) z += Wout[k][j] * h2_last[j];
+                for (int j = 0; j < D; ++j) z += Wout[k][j] * h2_norm[j];
                 logits[k] = z;
             }
 
@@ -330,18 +409,21 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
 
             vector<vector<double>> gWout(vocab, vector<double>(D, 0.0));
             vector<double> gbout(vocab, 0.0);
-            vector<double> dh2_last(D, 0.0);
+            vector<double> dh2_norm(D, 0.0);
             for (int k = 0; k < vocab; ++k) {
                 gbout[k] = dz[k];
                 for (int j = 0; j < D; ++j) {
-                    gWout[k][j] = dz[k] * h2_last[j];
-                    dh2_last[j] += Wout[k][j] * dz[k];
+                    gWout[k][j] = dz[k] * h2_norm[j];
+                    dh2_norm[j] += Wout[k][j] * dz[k];
                 }
             }
 
+            vector<double> gln2_gamma(D, 0.0), gln2_beta(D, 0.0);
+            vector<double> dpre2 = layer_norm_backward(pre2, ln2_gamma, dh2_norm, gln2_gamma, gln2_beta);
+
             // Backprop FFN and residual.
-            vector<double> dh1_last = dh2_last;
-            vector<double> dff2 = dh2_last;
+            vector<double> dh1_norm = dpre2;
+            vector<double> dff2 = dpre2;
 
             vector<vector<double>> gWff2(D, vector<double>(FF, 0.0));
             vector<double> gbff2(D, 0.0);
@@ -362,15 +444,18 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
             for (int i = 0; i < FF; ++i) {
                 gbff1[i] = dff_pre[i];
                 for (int j = 0; j < D; ++j) {
-                    gWff1[i][j] = dff_pre[i] * h1_last[j];
-                    dh1_last[j] += Wff1[i][j] * dff_pre[i];
+                    gWff1[i][j] = dff_pre[i] * h1_norm[j];
+                    dh1_norm[j] += Wff1[i][j] * dff_pre[i];
                 }
             }
 
+            vector<double> gln1_gamma(D, 0.0), gln1_beta(D, 0.0);
+            vector<double> dpre1 = layer_norm_backward(pre1, ln1_gamma, dh1_norm, gln1_gamma, gln1_beta);
+
             // Backprop attention path.
-            vector<double> dattn_out = dh1_last;
+            vector<double> dattn_out = dpre1;
             vector<double> dx_last(D, 0.0);
-            for (int d = 0; d < D; ++d) dx_last[d] += dh1_last[d]; // residual x[last] -> h1[last]
+            for (int d = 0; d < D; ++d) dx_last[d] += dpre1[d]; // residual x[last] -> pre1
 
             vector<vector<double>> gWo(D, vector<double>(D, 0.0));
             vector<double> dhead(D, 0.0);
@@ -448,6 +533,12 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
             for (int i = 0; i < FF; ++i) {
                 for (int j = 0; j < D; ++j) Wff1[i][j] -= lr * gWff1[i][j];
                 bff1[i] -= lr * gbff1[i];
+            }
+            for (int d = 0; d < D; ++d) {
+                ln1_gamma[d] -= lr * gln1_gamma[d];
+                ln1_beta[d] -= lr * gln1_beta[d];
+                ln2_gamma[d] -= lr * gln2_gamma[d];
+                ln2_beta[d] -= lr * gln2_beta[d];
             }
             for (int t = 0; t < T; ++t) {
                 int tok = ctx[t];
