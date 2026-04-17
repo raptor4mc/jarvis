@@ -18,21 +18,20 @@ double fast_tanh(double x) {
     return tanh(x);
 }
 
-vector<string> split_words(const string &s) {
-    vector<string> words;
-    string cur;
-    for (char c : s) {
-        if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
-            if (!cur.empty()) {
-                words.push_back(cur);
-                cur.clear();
-            }
-        } else {
-            cur.push_back(c);
-        }
+vector<int> tokenize_bytes(const string &s) {
+    vector<int> tokens;
+    tokens.reserve(s.size());
+    for (unsigned char c : s) tokens.push_back((int)c);
+    return tokens;
+}
+
+string detokenize_bytes(const vector<int> &tokens) {
+    string out;
+    out.reserve(tokens.size());
+    for (int t : tokens) {
+        if (t >= 0 && t <= 255) out.push_back((char)t);
     }
-    if (!cur.empty()) words.push_back(cur);
-    return words;
+    return out;
 }
 
 vector<double> softmax(const vector<double> &z) {
@@ -76,7 +75,7 @@ int sample_next_token(const vector<double> &logits, double temperature, bool det
 int main() {
     srand((unsigned)time(nullptr));
 
-    // Training text (original, self-contained)
+    // Training text (self-contained + optional wikipedia snippet file)
     string text =
         "hello there i am an offline chatbot created to demonstrate how a small neural network can learn patterns from text "
         "i do not use the internet and i do not rely on external data everything i know is written inside this program "
@@ -87,28 +86,20 @@ int main() {
         "feel free to experiment with different prompts and see how the model reacts to your input "
         "remember that this chatbot is only a demonstration and not a full language model but it can still be fun to interact with ";
 
-    vector<string> words = split_words(text);
-    if (words.size() < 10) {
-        cout << "Not enough training words.\n";
+    ifstream wiki_in("wikipedia.txt");
+    if (wiki_in) {
+        string wiki((istreambuf_iterator<char>(wiki_in)), istreambuf_iterator<char>());
+        text += "\n";
+        text += wiki;
+    }
+
+    vector<int> data = tokenize_bytes(text);
+    if (data.size() < 16) {
+        cout << "Not enough training tokens.\n";
         return 0;
     }
-
-    // Build vocabulary
-    map<string,int> stoi;
-    map<int,string> itos;
-    for (const string &w : words) {
-        if (stoi.find(w) == stoi.end()) {
-            int idx = (int)stoi.size();
-            stoi[w] = idx;
-            itos[idx] = w;
-        }
-    }
-    int vocab = (int)stoi.size();
-    cout << "Vocab size: " << vocab << ", training words: " << words.size() << endl;
-
-    // Encode words as indices
-    vector<int> data;
-    for (const string &w : words) data.push_back(stoi[w]);
+    int vocab = 256; // byte-level tokenizer vocabulary
+    cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
 
     // Build training samples: 3-word context -> next word
     struct Sample { int w0, w1, w2, target; };
@@ -329,14 +320,11 @@ int main() {
         cout << "Warning: failed to save weights to " << weights_file << ".\n";
     }
 
-    // Generation: given last 3 known words, predict continuation
+    // Generation: given last 3 known tokens, predict continuation
     auto generate = [&](const vector<int> &context, int length, double temperature, bool deterministic) {
         vector<int> ctx = context;
         while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
-        string out;
-        for (int idx : ctx) {
-            out += itos[idx] + " ";
-        }
+        vector<int> out_tokens = ctx;
 
         for (int step = 0; step < length; ++step) {
             int w0 = ctx[ctx.size()-3];
@@ -376,13 +364,13 @@ int main() {
             int next_idx = sample_next_token(z3, temperature, deterministic);
 
             ctx.push_back(next_idx);
-            out += itos[next_idx] + " ";
+            out_tokens.push_back(next_idx);
         }
-        return out;
+        return detokenize_bytes(out_tokens);
     };
 
     cout << "\nChatbot ready.\n";
-    cout << "Type a message (using simple words like in the training text).\n";
+    cout << "Type a message.\n";
     cout << "Use /temp <value> to control randomness (example: /temp 0.7).\n";
     cout << "Use /det on or /det off for deterministic generation.\n";
     cout << "Type 'quit' to exit.\n\n";
@@ -419,16 +407,7 @@ int main() {
             continue;
         }
 
-        vector<string> in_words = split_words(line);
-        vector<int> ctx;
-        for (const string &w : in_words) {
-            auto it = stoi.find(w);
-            if (it != stoi.end()) ctx.push_back(it->second);
-        }
-        if (ctx.empty()) {
-            cout << "Bot: i do not know these words try simpler ones like hello or chatbot\n";
-            continue;
-        }
+        vector<int> ctx = tokenize_bytes(line);
         if (ctx.size() < 3) {
             while (ctx.size() < 3) ctx.insert(ctx.begin(), ctx.front());
         }
