@@ -1,0 +1,5 @@
+Artificial intelligence (AI) is the field of building computer systems that can perform tasks associated with human intelligence.
+Machine learning is a subfield of AI in which models learn patterns from data instead of being explicitly programmed with every rule.
+The Earth is the third planet from the Sun and the only astronomical object known to support life.
+The Pacific Ocean is the largest and deepest ocean on Earth, covering more than 30 percent of the planet's surface.
+The Internet is a global system of interconnected computer networks that communicate using standardized protocols.
