@@ -245,12 +245,79 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
         double total_loss = 0.0;
 
         for (const auto &s : samples) {
-            vector<double> h_last = forward_last_hidden(s.ctx);
+            vector<int> ctx = normalize_context(s.ctx);
+
+            vector<vector<double>> x(T, vector<double>(D));
+            for (int t = 0; t < T; ++t) {
+                for (int d = 0; d < D; ++d) x[t][d] = token_emb[ctx[t]][d] + pos_emb[t][d];
+            }
+
+            int last = T - 1;
+            vector<double> q_last(D);
+            vector<vector<double>> k_all(T, vector<double>(D));
+            vector<vector<double>> v_all(T, vector<double>(D));
+
+            for (int i = 0; i < D; ++i) {
+                double qv = 0.0;
+                for (int j = 0; j < D; ++j) qv += Wq[i][j] * x[last][j];
+                q_last[i] = qv;
+            }
+            for (int t = 0; t < T; ++t) {
+                for (int i = 0; i < D; ++i) {
+                    double kv = 0.0, vv = 0.0;
+                    for (int j = 0; j < D; ++j) {
+                        kv += Wk[i][j] * x[t][j];
+                        vv += Wv[i][j] * x[t][j];
+                    }
+                    k_all[t][i] = kv;
+                    v_all[t][i] = vv;
+                }
+            }
+
+            const double scale = 1.0 / sqrt((double)D);
+            vector<double> scores(T);
+            for (int t = 0; t < T; ++t) {
+                double dot = 0.0;
+                for (int d = 0; d < D; ++d) dot += q_last[d] * k_all[t][d];
+                scores[t] = dot * scale;
+            }
+            vector<double> a = softmax(scores);
+
+            vector<double> head(D, 0.0);
+            for (int t = 0; t < T; ++t) {
+                for (int d = 0; d < D; ++d) head[d] += a[t] * v_all[t][d];
+            }
+
+            vector<double> attn_out(D, 0.0);
+            for (int i = 0; i < D; ++i) {
+                for (int j = 0; j < D; ++j) attn_out[i] += Wo[i][j] * head[j];
+            }
+
+            vector<double> h1_last(D);
+            for (int d = 0; d < D; ++d) h1_last[d] = x[last][d] + attn_out[d];
+
+            vector<double> ff_pre(FF), ff(FF);
+            for (int i = 0; i < FF; ++i) {
+                double z = bff1[i];
+                for (int j = 0; j < D; ++j) z += Wff1[i][j] * h1_last[j];
+                ff_pre[i] = z;
+                ff[i] = z > 0.0 ? z : 0.0;
+            }
+
+            vector<double> ff2(D);
+            for (int i = 0; i < D; ++i) {
+                double z = bff2[i];
+                for (int j = 0; j < FF; ++j) z += Wff2[i][j] * ff[j];
+                ff2[i] = z;
+            }
+
+            vector<double> h2_last(D);
+            for (int d = 0; d < D; ++d) h2_last[d] = h1_last[d] + ff2[d];
 
             vector<double> logits(vocab);
             for (int k = 0; k < vocab; ++k) {
                 double z = bout[k];
-                for (int j = 0; j < D; ++j) z += Wout[k][j] * h_last[j];
+                for (int j = 0; j < D; ++j) z += Wout[k][j] * h2_last[j];
                 logits[k] = z;
             }
 
@@ -261,12 +328,133 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
             for (int k = 0; k < vocab; ++k) dz[k] = y[k];
             dz[s.target] -= 1.0;
 
-            // Train LM head (Wout, bout). Transformer block stays fixed.
+            vector<vector<double>> gWout(vocab, vector<double>(D, 0.0));
+            vector<double> gbout(vocab, 0.0);
+            vector<double> dh2_last(D, 0.0);
             for (int k = 0; k < vocab; ++k) {
+                gbout[k] = dz[k];
                 for (int j = 0; j < D; ++j) {
-                    Wout[k][j] -= lr * dz[k] * h_last[j];
+                    gWout[k][j] = dz[k] * h2_last[j];
+                    dh2_last[j] += Wout[k][j] * dz[k];
                 }
-                bout[k] -= lr * dz[k];
+            }
+
+            // Backprop FFN and residual.
+            vector<double> dh1_last = dh2_last;
+            vector<double> dff2 = dh2_last;
+
+            vector<vector<double>> gWff2(D, vector<double>(FF, 0.0));
+            vector<double> gbff2(D, 0.0);
+            vector<double> dff(FF, 0.0);
+            for (int i = 0; i < D; ++i) {
+                gbff2[i] = dff2[i];
+                for (int j = 0; j < FF; ++j) {
+                    gWff2[i][j] = dff2[i] * ff[j];
+                    dff[j] += Wff2[i][j] * dff2[i];
+                }
+            }
+
+            vector<double> dff_pre(FF, 0.0);
+            for (int i = 0; i < FF; ++i) dff_pre[i] = ff_pre[i] > 0.0 ? dff[i] : 0.0;
+
+            vector<vector<double>> gWff1(FF, vector<double>(D, 0.0));
+            vector<double> gbff1(FF, 0.0);
+            for (int i = 0; i < FF; ++i) {
+                gbff1[i] = dff_pre[i];
+                for (int j = 0; j < D; ++j) {
+                    gWff1[i][j] = dff_pre[i] * h1_last[j];
+                    dh1_last[j] += Wff1[i][j] * dff_pre[i];
+                }
+            }
+
+            // Backprop attention path.
+            vector<double> dattn_out = dh1_last;
+            vector<double> dx_last(D, 0.0);
+            for (int d = 0; d < D; ++d) dx_last[d] += dh1_last[d]; // residual x[last] -> h1[last]
+
+            vector<vector<double>> gWo(D, vector<double>(D, 0.0));
+            vector<double> dhead(D, 0.0);
+            for (int i = 0; i < D; ++i) {
+                for (int j = 0; j < D; ++j) {
+                    gWo[i][j] = dattn_out[i] * head[j];
+                    dhead[j] += Wo[i][j] * dattn_out[i];
+                }
+            }
+
+            vector<double> da(T, 0.0);
+            vector<vector<double>> dv_all(T, vector<double>(D, 0.0));
+            for (int t = 0; t < T; ++t) {
+                double dot = 0.0;
+                for (int d = 0; d < D; ++d) {
+                    dv_all[t][d] += a[t] * dhead[d];
+                    dot += dhead[d] * v_all[t][d];
+                }
+                da[t] = dot;
+            }
+
+            double sum_da_a = 0.0;
+            for (int t = 0; t < T; ++t) sum_da_a += da[t] * a[t];
+            vector<double> dscores(T, 0.0);
+            for (int t = 0; t < T; ++t) dscores[t] = a[t] * (da[t] - sum_da_a);
+
+            vector<double> dq_last(D, 0.0);
+            vector<vector<double>> dk_all(T, vector<double>(D, 0.0));
+            for (int t = 0; t < T; ++t) {
+                for (int d = 0; d < D; ++d) {
+                    dq_last[d] += scale * dscores[t] * k_all[t][d];
+                    dk_all[t][d] += scale * dscores[t] * q_last[d];
+                }
+            }
+
+            vector<vector<double>> gWq(D, vector<double>(D, 0.0));
+            for (int i = 0; i < D; ++i) {
+                for (int j = 0; j < D; ++j) {
+                    gWq[i][j] = dq_last[i] * x[last][j];
+                    dx_last[j] += Wq[i][j] * dq_last[i];
+                }
+            }
+
+            vector<vector<double>> gWk(D, vector<double>(D, 0.0));
+            vector<vector<double>> gWv(D, vector<double>(D, 0.0));
+            vector<vector<double>> dx_all(T, vector<double>(D, 0.0));
+            for (int t = 0; t < T; ++t) {
+                for (int i = 0; i < D; ++i) {
+                    for (int j = 0; j < D; ++j) {
+                        gWk[i][j] += dk_all[t][i] * x[t][j];
+                        gWv[i][j] += dv_all[t][i] * x[t][j];
+                        dx_all[t][j] += Wk[i][j] * dk_all[t][i] + Wv[i][j] * dv_all[t][i];
+                    }
+                }
+            }
+            for (int d = 0; d < D; ++d) dx_all[last][d] += dx_last[d];
+
+            // SGD update.
+            for (int k = 0; k < vocab; ++k) {
+                for (int j = 0; j < D; ++j) Wout[k][j] -= lr * gWout[k][j];
+                bout[k] -= lr * gbout[k];
+            }
+            for (int i = 0; i < D; ++i) {
+                for (int j = 0; j < D; ++j) {
+                    Wo[i][j] -= lr * gWo[i][j];
+                    Wq[i][j] -= lr * gWq[i][j];
+                    Wk[i][j] -= lr * gWk[i][j];
+                    Wv[i][j] -= lr * gWv[i][j];
+                }
+            }
+            for (int i = 0; i < D; ++i) {
+                for (int j = 0; j < FF; ++j) Wff2[i][j] -= lr * gWff2[i][j];
+                bff2[i] -= lr * gbff2[i];
+            }
+            for (int i = 0; i < FF; ++i) {
+                for (int j = 0; j < D; ++j) Wff1[i][j] -= lr * gWff1[i][j];
+                bff1[i] -= lr * gbff1[i];
+            }
+            for (int t = 0; t < T; ++t) {
+                int tok = ctx[t];
+                for (int d = 0; d < D; ++d) {
+                    token_emb[tok][d] -= lr * dx_all[t][d];
+                    pos_emb[t][d] -= lr * dx_all[t][d];
+                }
             }
         }
 
