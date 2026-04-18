@@ -1,6 +1,7 @@
 #include "model.h"
 #include "tokenizer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -301,8 +302,9 @@ bool ChatModel::save_weights(const string &filename) const {
     return (bool)out;
 }
 
-void ChatModel::train(const vector<int> &data, int epochs, double lr) {
+void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_size) {
     if ((int)data.size() <= T) return;
+    if (batch_size < 1) batch_size = 1;
 
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
@@ -313,12 +315,37 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
         samples.push_back({ctx, target});
     }
 
-    cout << "Samples: " << samples.size() << endl;
+    cout << "Samples: " << samples.size() << ", batch size: " << batch_size << endl;
 
     for (int ep = 0; ep < epochs; ++ep) {
         double total_loss = 0.0;
 
-        for (const auto &s : samples) {
+        for (size_t batch_start = 0; batch_start < samples.size(); batch_start += (size_t)batch_size) {
+            size_t batch_end = min(samples.size(), batch_start + (size_t)batch_size);
+            int current_batch = (int)(batch_end - batch_start);
+            double step_lr = lr / (double)current_batch;
+
+            vector<vector<double>> gWout_sum(vocab, vector<double>(D, 0.0));
+            vector<double> gbout_sum(vocab, 0.0);
+
+            vector<vector<double>> gWo_sum(D, vector<double>(D, 0.0));
+            vector<vector<double>> gWq_sum(D, vector<double>(D, 0.0));
+            vector<vector<double>> gWk_sum(D, vector<double>(D, 0.0));
+            vector<vector<double>> gWv_sum(D, vector<double>(D, 0.0));
+
+            vector<vector<double>> gWff2_sum(D, vector<double>(FF, 0.0));
+            vector<double> gbff2_sum(D, 0.0);
+            vector<vector<double>> gWff1_sum(FF, vector<double>(D, 0.0));
+            vector<double> gbff1_sum(FF, 0.0);
+
+            vector<double> gln1_gamma_sum(D, 0.0), gln1_beta_sum(D, 0.0);
+            vector<double> gln2_gamma_sum(D, 0.0), gln2_beta_sum(D, 0.0);
+
+            vector<vector<double>> dtoken_emb_sum(vocab, vector<double>(D, 0.0));
+            vector<vector<double>> dpos_emb_sum(T, vector<double>(D, 0.0));
+
+            for (size_t sample_idx = batch_start; sample_idx < batch_end; ++sample_idx) {
+                const auto &s = samples[sample_idx];
             vector<int> ctx = normalize_context(s.ctx);
 
             vector<vector<double>> x(T, vector<double>(D));
@@ -510,45 +537,73 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr) {
             }
             for (int d = 0; d < D; ++d) dx_all[last][d] += dx_last[d];
 
-            // SGD update.
+                for (int k = 0; k < vocab; ++k) {
+                    gbout_sum[k] += gbout[k];
+                    for (int j = 0; j < D; ++j) gWout_sum[k][j] += gWout[k][j];
+                }
+                for (int i = 0; i < D; ++i) {
+                    gbff2_sum[i] += gbff2[i];
+                    gln1_gamma_sum[i] += gln1_gamma[i];
+                    gln1_beta_sum[i] += gln1_beta[i];
+                    gln2_gamma_sum[i] += gln2_gamma[i];
+                    gln2_beta_sum[i] += gln2_beta[i];
+                    for (int j = 0; j < D; ++j) {
+                        gWo_sum[i][j] += gWo[i][j];
+                        gWq_sum[i][j] += gWq[i][j];
+                        gWk_sum[i][j] += gWk[i][j];
+                        gWv_sum[i][j] += gWv[i][j];
+                    }
+                    for (int j = 0; j < FF; ++j) gWff2_sum[i][j] += gWff2[i][j];
+                }
+                for (int i = 0; i < FF; ++i) {
+                    gbff1_sum[i] += gbff1[i];
+                    for (int j = 0; j < D; ++j) gWff1_sum[i][j] += gWff1[i][j];
+                }
+                for (int t = 0; t < T; ++t) {
+                    int tok = ctx[t];
+                    for (int d = 0; d < D; ++d) {
+                        dtoken_emb_sum[tok][d] += dx_all[t][d];
+                        dpos_emb_sum[t][d] += dx_all[t][d];
+                    }
+                }
+            }
+
             for (int k = 0; k < vocab; ++k) {
-                for (int j = 0; j < D; ++j) Wout[k][j] -= lr * gWout[k][j];
-                bout[k] -= lr * gbout[k];
+                for (int j = 0; j < D; ++j) Wout[k][j] -= step_lr * gWout_sum[k][j];
+                bout[k] -= step_lr * gbout_sum[k];
             }
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
-                    Wo[i][j] -= lr * gWo[i][j];
-                    Wq[i][j] -= lr * gWq[i][j];
-                    Wk[i][j] -= lr * gWk[i][j];
-                    Wv[i][j] -= lr * gWv[i][j];
+                    Wo[i][j] -= step_lr * gWo_sum[i][j];
+                    Wq[i][j] -= step_lr * gWq_sum[i][j];
+                    Wk[i][j] -= step_lr * gWk_sum[i][j];
+                    Wv[i][j] -= step_lr * gWv_sum[i][j];
                 }
             }
             for (int i = 0; i < D; ++i) {
-                for (int j = 0; j < FF; ++j) Wff2[i][j] -= lr * gWff2[i][j];
-                bff2[i] -= lr * gbff2[i];
+                for (int j = 0; j < FF; ++j) Wff2[i][j] -= step_lr * gWff2_sum[i][j];
+                bff2[i] -= step_lr * gbff2_sum[i];
             }
             for (int i = 0; i < FF; ++i) {
-                for (int j = 0; j < D; ++j) Wff1[i][j] -= lr * gWff1[i][j];
-                bff1[i] -= lr * gbff1[i];
+                for (int j = 0; j < D; ++j) Wff1[i][j] -= step_lr * gWff1_sum[i][j];
+                bff1[i] -= step_lr * gbff1_sum[i];
             }
             for (int d = 0; d < D; ++d) {
-                ln1_gamma[d] -= lr * gln1_gamma[d];
-                ln1_beta[d] -= lr * gln1_beta[d];
-                ln2_gamma[d] -= lr * gln2_gamma[d];
-                ln2_beta[d] -= lr * gln2_beta[d];
+                ln1_gamma[d] -= step_lr * gln1_gamma_sum[d];
+                ln1_beta[d] -= step_lr * gln1_beta_sum[d];
+                ln2_gamma[d] -= step_lr * gln2_gamma_sum[d];
+                ln2_beta[d] -= step_lr * gln2_beta_sum[d];
+            }
+            for (int tok = 0; tok < vocab; ++tok) {
+                for (int d = 0; d < D; ++d) token_emb[tok][d] -= step_lr * dtoken_emb_sum[tok][d];
             }
             for (int t = 0; t < T; ++t) {
-                int tok = ctx[t];
-                for (int d = 0; d < D; ++d) {
-                    token_emb[tok][d] -= lr * dx_all[t][d];
-                    pos_emb[t][d] -= lr * dx_all[t][d];
-                }
+                for (int d = 0; d < D; ++d) pos_emb[t][d] -= step_lr * dpos_emb_sum[t][d];
             }
         }
 
-        if (ep % 100 == 0) {
-            cout << "Epoch " << ep << " loss: " << total_loss << endl;
-        }
+        double avg_loss = total_loss / (double)samples.size();
+        cout << "Epoch " << (ep + 1) << "/" << epochs << " avg loss: " << avg_loss << endl;
     }
 }
 
