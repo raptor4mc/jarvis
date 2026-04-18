@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -205,6 +208,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
 
     // x[t] = token_emb + pos_emb
     vector<vector<double>> x(T, vector<double>(D));
+    #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; ++t) {
         int tok = ctx[t];
         for (int j = 0; j < D; ++j) x[t][j] = token_emb[idx2d(tok, j, D)] + pos_emb[idx2d(t, j, D)];
@@ -212,6 +216,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
 
     // q, k, v
     vector<vector<double>> q(T, vector<double>(D)), k(T, vector<double>(D)), v(T, vector<double>(D));
+    #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; ++t) {
         for (int i = 0; i < D; ++i) {
             q[t][i] = dot_simd(&Wq[idx2d(i, 0, D)], x[t].data(), D);
@@ -223,6 +228,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     // Causal self-attention.
     vector<vector<double>> attn_out(T, vector<double>(D, 0.0));
     const double scale = 1.0 / sqrt((double)D);
+    #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; ++t) {
         vector<double> scores(T, -1e9);
         for (int j = 0; j <= t; ++j) {
@@ -248,6 +254,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
 
     // FFN + residual + LayerNorm.
     vector<vector<double>> h2(T, vector<double>(D));
+    #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; ++t) {
         vector<double> ff(FF, 0.0);
         for (int i = 0; i < FF; ++i) {
@@ -345,6 +352,10 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
 
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
     samples.reserve(data.size());
@@ -375,6 +386,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
 
             // Batch forward pass.
             vector<vector<vector<double>>> x(B, vector<vector<double>>(T, vector<double>(D, 0.0)));
+            #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
                 for (int t = 0; t < T; ++t) {
                     int tok = batch_ctx[b][t];
@@ -385,6 +397,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> q_last(B, vector<double>(D, 0.0));
             vector<vector<vector<double>>> k_all(B, vector<vector<double>>(T, vector<double>(D, 0.0)));
             vector<vector<vector<double>>> v_all(B, vector<vector<double>>(T, vector<double>(D, 0.0)));
+            #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < D; ++i) {
                     q_last[b][i] = dot_simd(&Wq[idx2d(i, 0, D)], x[b][last].data(), D);
@@ -399,6 +412,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
 
             vector<vector<double>> a(B, vector<double>(T, 0.0));
             vector<vector<double>> head(B, vector<double>(D, 0.0));
+            #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
                 vector<double> scores(T);
                 for (int t = 0; t < T; ++t) {
@@ -411,6 +425,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> attn_out(B, vector<double>(D, 0.0));
             vector<vector<double>> pre1(B, vector<double>(D, 0.0));
             vector<vector<double>> h1_norm(B, vector<double>(D, 0.0));
+            #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < D; ++i) {
                     attn_out[b][i] = dot_simd(&Wo[idx2d(i, 0, D)], head[b].data(), D);
@@ -424,6 +439,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> ff2(B, vector<double>(D, 0.0));
             vector<vector<double>> pre2(B, vector<double>(D, 0.0));
             vector<vector<double>> h2_norm(B, vector<double>(D, 0.0));
+            #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < FF; ++i) {
                     double z = bff1[i] + dot_simd(&Wff1[idx2d(i, 0, D)], h1_norm[b].data(), D);
@@ -439,6 +455,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             }
 
             vector<vector<double>> y(B, vector<double>(vocab, 0.0));
+            #pragma omp parallel for reduction(+:total_loss) schedule(static)
             for (int b = 0; b < B; ++b) {
                 vector<double> logits(vocab, 0.0);
                 for (int k = 0; k < vocab; ++k) {
@@ -573,10 +590,12 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                 }
             }
 
+            #pragma omp parallel for schedule(static)
             for (int k = 0; k < vocab; ++k) {
                 for (int j = 0; j < D; ++j) Wout[idx2d(k, j, D)] -= step_lr * gWout_sum[k][j];
                 bout[k] -= step_lr * gbout_sum[k];
             }
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
                     Wo[idx2d(i, j, D)] -= step_lr * gWo_sum[i][j];
@@ -592,13 +611,16 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                 ln2_gamma[i] -= step_lr * gln2_gamma_sum[i];
                 ln2_beta[i] -= step_lr * gln2_beta_sum[i];
             }
+            #pragma omp parallel for schedule(static)
             for (int i = 0; i < FF; ++i) {
                 for (int j = 0; j < D; ++j) Wff1[idx2d(i, j, D)] -= step_lr * gWff1_sum[i][j];
                 bff1[i] -= step_lr * gbff1_sum[i];
             }
+            #pragma omp parallel for schedule(static)
             for (int tok = 0; tok < vocab; ++tok) {
                 for (int d = 0; d < D; ++d) token_emb[idx2d(tok, d, D)] -= step_lr * dtoken_emb_sum[tok][d];
             }
+            #pragma omp parallel for schedule(static)
             for (int t = 0; t < T; ++t) {
                 for (int d = 0; d < D; ++d) pos_emb[idx2d(t, d, D)] -= step_lr * dpos_emb_sum[t][d];
             }
