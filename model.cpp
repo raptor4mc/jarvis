@@ -9,6 +9,9 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#if defined(USE_CBLAS)
+#include <cblas.h>
+#endif
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -49,6 +52,14 @@ static inline void axpy_simd(double *y, const double *x, double alpha, int n) {
     for (; i < n; ++i) y[i] += alpha * x[i];
 #else
     for (int i = 0; i < n; ++i) y[i] += alpha * x[i];
+#endif
+}
+
+static inline void matvec_rm(const double *A, const double *x, double *y, int rows, int cols) {
+#if defined(USE_CBLAS)
+    cblas_dgemv(CblasRowMajor, CblasNoTrans, rows, cols, 1.0, A, cols, x, 1, 0.0, y, 1);
+#else
+    for (int r = 0; r < rows; ++r) y[r] = dot_simd(A + (size_t)r * cols, x, cols);
 #endif
 }
 
@@ -218,11 +229,9 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     vector<vector<double>> q(T, vector<double>(D)), k(T, vector<double>(D)), v(T, vector<double>(D));
     #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; ++t) {
-        for (int i = 0; i < D; ++i) {
-            q[t][i] = dot_simd(&Wq[idx2d(i, 0, D)], x[t].data(), D);
-            k[t][i] = dot_simd(&Wk[idx2d(i, 0, D)], x[t].data(), D);
-            v[t][i] = dot_simd(&Wv[idx2d(i, 0, D)], x[t].data(), D);
-        }
+        matvec_rm(Wq.data(), x[t].data(), q[t].data(), D, D);
+        matvec_rm(Wk.data(), x[t].data(), k[t].data(), D, D);
+        matvec_rm(Wv.data(), x[t].data(), v[t].data(), D, D);
     }
 
     // Causal self-attention.
@@ -239,9 +248,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
         vector<double> head(D, 0.0);
         for (int j = 0; j <= t; ++j) axpy_simd(head.data(), v[j].data(), a[j], D);
 
-        for (int i = 0; i < D; ++i) {
-            attn_out[t][i] = dot_simd(&Wo[idx2d(i, 0, D)], head.data(), D);
-        }
+        matvec_rm(Wo.data(), head.data(), attn_out[t].data(), D, D);
     }
 
     // Residual + LayerNorm after attention.
@@ -256,16 +263,15 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     vector<vector<double>> h2(T, vector<double>(D));
     #pragma omp parallel for schedule(static)
     for (int t = 0; t < T; ++t) {
-        vector<double> ff(FF, 0.0);
+        vector<double> ff(FF, 0.0), ff2(D, 0.0);
+        matvec_rm(Wff1.data(), h1[t].data(), ff.data(), FF, D);
         for (int i = 0; i < FF; ++i) {
-            double z = bff1[i] + dot_simd(&Wff1[idx2d(i, 0, D)], h1[t].data(), D);
+            double z = bff1[i] + ff[i];
             ff[i] = z > 0.0 ? z : 0.0; // ReLU
         }
 
-        for (int i = 0; i < D; ++i) {
-            double z = bff2[i] + dot_simd(&Wff2[idx2d(i, 0, FF)], ff.data(), FF);
-            h2[t][i] = h1[t][i] + z;
-        }
+        matvec_rm(Wff2.data(), ff.data(), ff2.data(), D, FF);
+        for (int i = 0; i < D; ++i) h2[t][i] = h1[t][i] + bff2[i] + ff2[i];
         h2[t] = layer_norm_forward(h2[t], ln2_gamma, ln2_beta);
     }
 
@@ -356,6 +362,10 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
 
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
     samples.reserve(data.size());
@@ -399,14 +409,10 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<vector<double>>> v_all(B, vector<vector<double>>(T, vector<double>(D, 0.0)));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                for (int i = 0; i < D; ++i) {
-                    q_last[b][i] = dot_simd(&Wq[idx2d(i, 0, D)], x[b][last].data(), D);
-                }
+                matvec_rm(Wq.data(), x[b][last].data(), q_last[b].data(), D, D);
                 for (int t = 0; t < T; ++t) {
-                    for (int i = 0; i < D; ++i) {
-                        k_all[b][t][i] = dot_simd(&Wk[idx2d(i, 0, D)], x[b][t].data(), D);
-                        v_all[b][t][i] = dot_simd(&Wv[idx2d(i, 0, D)], x[b][t].data(), D);
-                    }
+                    matvec_rm(Wk.data(), x[b][t].data(), k_all[b][t].data(), D, D);
+                    matvec_rm(Wv.data(), x[b][t].data(), v_all[b][t].data(), D, D);
                 }
             }
 
@@ -427,10 +433,8 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> h1_norm(B, vector<double>(D, 0.0));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                for (int i = 0; i < D; ++i) {
-                    attn_out[b][i] = dot_simd(&Wo[idx2d(i, 0, D)], head[b].data(), D);
-                    pre1[b][i] = x[b][last][i] + attn_out[b][i];
-                }
+                matvec_rm(Wo.data(), head[b].data(), attn_out[b].data(), D, D);
+                for (int i = 0; i < D; ++i) pre1[b][i] = x[b][last][i] + attn_out[b][i];
                 h1_norm[b] = layer_norm_forward(pre1[b], ln1_gamma, ln1_beta);
             }
 
@@ -441,16 +445,14 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> h2_norm(B, vector<double>(D, 0.0));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
+                matvec_rm(Wff1.data(), h1_norm[b].data(), ff_pre[b].data(), FF, D);
                 for (int i = 0; i < FF; ++i) {
-                    double z = bff1[i] + dot_simd(&Wff1[idx2d(i, 0, D)], h1_norm[b].data(), D);
+                    double z = bff1[i] + ff_pre[b][i];
                     ff_pre[b][i] = z;
                     ff[b][i] = z > 0.0 ? z : 0.0;
                 }
-                for (int i = 0; i < D; ++i) {
-                    double z = bff2[i] + dot_simd(&Wff2[idx2d(i, 0, FF)], ff[b].data(), FF);
-                    ff2[b][i] = z;
-                    pre2[b][i] = h1_norm[b][i] + z;
-                }
+                matvec_rm(Wff2.data(), ff[b].data(), ff2[b].data(), D, FF);
+                for (int i = 0; i < D; ++i) pre2[b][i] = h1_norm[b][i] + bff2[i] + ff2[b][i];
                 h2_norm[b] = layer_norm_forward(pre2[b], ln2_gamma, ln2_beta);
             }
 
@@ -458,9 +460,8 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             #pragma omp parallel for reduction(+:total_loss) schedule(static)
             for (int b = 0; b < B; ++b) {
                 vector<double> logits(vocab, 0.0);
-                for (int k = 0; k < vocab; ++k) {
-                    logits[k] = bout[k] + dot_simd(&Wout[idx2d(k, 0, D)], h2_norm[b].data(), D);
-                }
+                matvec_rm(Wout.data(), h2_norm[b].data(), logits.data(), vocab, D);
+                for (int k = 0; k < vocab; ++k) logits[k] += bout[k];
                 y[b] = softmax(logits);
                 total_loss += -log(y[b][batch_target[b]] + 1e-12);
             }
@@ -641,9 +642,8 @@ string ChatModel::generate(const vector<int> &context, int length, double temper
         vector<double> h_last = forward_last_hidden(norm);
 
         vector<double> logits(vocab);
-        for (int k = 0; k < vocab; ++k) {
-            logits[k] = bout[k] + dot_simd(&Wout[idx2d(k, 0, D)], h_last.data(), D);
-        }
+        matvec_rm(Wout.data(), h_last.data(), logits.data(), vocab, D);
+        for (int k = 0; k < vocab; ++k) logits[k] += bout[k];
 
         int next_idx = sample_next_token(logits, temperature, deterministic);
         ctx.push_back(next_idx);
