@@ -11,27 +11,31 @@ using namespace std;
 
 ChatModel::ChatModel(int vocab_size, int model_dim, int seq_len)
     : vocab(vocab_size), D(model_dim), T(seq_len), FF(model_dim * 2),
-      token_emb(vocab, vector<double>(D)),
-      pos_emb(T, vector<double>(D)),
-      Wq(D, vector<double>(D)), Wk(D, vector<double>(D)), Wv(D, vector<double>(D)), Wo(D, vector<double>(D)),
-      Wff1(FF, vector<double>(D)), bff1(FF, 0.0),
-      Wff2(D, vector<double>(FF)), bff2(D, 0.0),
+      token_emb(vocab * D),
+      pos_emb(T * D),
+      Wq(D * D), Wk(D * D), Wv(D * D), Wo(D * D),
+      Wff1(FF * D), bff1(FF, 0.0),
+      Wff2(D * FF), bff2(D, 0.0),
       ln1_gamma(D, 1.0), ln1_beta(D, 0.0),
       ln2_gamma(D, 1.0), ln2_beta(D, 0.0),
-      Wout(vocab, vector<double>(D)), bout(vocab, 0.0) {
+      Wout(vocab * D), bout(vocab, 0.0) {
     for (int i = 0; i < vocab; ++i) {
-        for (int j = 0; j < D; ++j) token_emb[i][j] = rand_weight();
+        for (int j = 0; j < D; ++j) token_emb[idx2d(i, j, D)] = rand_weight();
     }
     for (int t = 0; t < T; ++t) {
-        for (int j = 0; j < D; ++j) pos_emb[t][j] = rand_weight();
+        for (int j = 0; j < D; ++j) pos_emb[idx2d(t, j, D)] = rand_weight();
     }
 
-    auto init_mat = [&](vector<vector<double>> &M) {
-        for (auto &row : M) for (double &v : row) v = rand_weight();
+    auto init_mat = [&](vector<double> &M) {
+        for (double &v : M) v = rand_weight();
     };
 
     init_mat(Wq); init_mat(Wk); init_mat(Wv); init_mat(Wo);
     init_mat(Wff1); init_mat(Wff2); init_mat(Wout);
+}
+
+size_t ChatModel::idx2d(int r, int c, int cols) {
+    return (size_t)r * (size_t)cols + (size_t)c;
 }
 
 double ChatModel::rand_weight() {
@@ -163,7 +167,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     vector<vector<double>> x(T, vector<double>(D));
     for (int t = 0; t < T; ++t) {
         int tok = ctx[t];
-        for (int j = 0; j < D; ++j) x[t][j] = token_emb[tok][j] + pos_emb[t][j];
+        for (int j = 0; j < D; ++j) x[t][j] = token_emb[idx2d(tok, j, D)] + pos_emb[idx2d(t, j, D)];
     }
 
     // q, k, v
@@ -172,9 +176,9 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
         for (int i = 0; i < D; ++i) {
             double qv = 0.0, kv = 0.0, vv = 0.0;
             for (int j = 0; j < D; ++j) {
-                qv += Wq[i][j] * x[t][j];
-                kv += Wk[i][j] * x[t][j];
-                vv += Wv[i][j] * x[t][j];
+                qv += Wq[idx2d(i, j, D)] * x[t][j];
+                kv += Wk[idx2d(i, j, D)] * x[t][j];
+                vv += Wv[idx2d(i, j, D)] * x[t][j];
             }
             q[t][i] = qv;
             k[t][i] = kv;
@@ -201,7 +205,7 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
 
         for (int i = 0; i < D; ++i) {
             double out = 0.0;
-            for (int j = 0; j < D; ++j) out += Wo[i][j] * head[j];
+            for (int j = 0; j < D; ++j) out += Wo[idx2d(i, j, D)] * head[j];
             attn_out[t][i] = out;
         }
     }
@@ -220,13 +224,13 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
         vector<double> ff(FF, 0.0);
         for (int i = 0; i < FF; ++i) {
             double z = bff1[i];
-            for (int j = 0; j < D; ++j) z += Wff1[i][j] * h1[t][j];
+            for (int j = 0; j < D; ++j) z += Wff1[idx2d(i, j, D)] * h1[t][j];
             ff[i] = z > 0.0 ? z : 0.0; // ReLU
         }
 
         for (int i = 0; i < D; ++i) {
             double z = bff2[i];
-            for (int j = 0; j < FF; ++j) z += Wff2[i][j] * ff[j];
+            for (int j = 0; j < FF; ++j) z += Wff2[idx2d(i, j, FF)] * ff[j];
             h2[t][i] = h1[t][i] + z;
         }
         h2[t] = layer_norm_forward(h2[t], ln2_gamma, ln2_beta);
@@ -239,12 +243,9 @@ bool ChatModel::load_weights(const string &filename) {
     ifstream in(filename, ios::binary);
     if (!in) return false;
 
-    auto read_mat = [&](vector<vector<double>> &M) {
-        for (auto &row : M) {
-            in.read(reinterpret_cast<char*>(row.data()), (long long)row.size() * sizeof(double));
-            if (!in) return false;
-        }
-        return true;
+    auto read_mat = [&](vector<double> &M) {
+        in.read(reinterpret_cast<char*>(M.data()), (long long)M.size() * sizeof(double));
+        return (bool)in;
     };
     auto read_vec = [&](vector<double> &v) {
         in.read(reinterpret_cast<char*>(v.data()), (long long)v.size() * sizeof(double));
@@ -275,8 +276,8 @@ bool ChatModel::save_weights(const string &filename) const {
     ofstream out(filename, ios::binary);
     if (!out) return false;
 
-    auto write_mat = [&](const vector<vector<double>> &M) {
-        for (const auto &row : M) out.write(reinterpret_cast<const char*>(row.data()), (long long)row.size() * sizeof(double));
+    auto write_mat = [&](const vector<double> &M) {
+        out.write(reinterpret_cast<const char*>(M.data()), (long long)M.size() * sizeof(double));
     };
     auto write_vec = [&](const vector<double> &v) {
         out.write(reinterpret_cast<const char*>(v.data()), (long long)v.size() * sizeof(double));
@@ -305,6 +306,10 @@ bool ChatModel::save_weights(const string &filename) const {
 void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_size) {
     if ((int)data.size() <= T) return;
     if (batch_size < 1) batch_size = 1;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
 
     if (batch_size <= 8) batch_size = 8;
     else if (batch_size <= 16) batch_size = 16;
@@ -343,7 +348,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             for (int b = 0; b < B; ++b) {
                 for (int t = 0; t < T; ++t) {
                     int tok = batch_ctx[b][t];
-                    for (int d = 0; d < D; ++d) x[b][t][d] = token_emb[tok][d] + pos_emb[t][d];
+                    for (int d = 0; d < D; ++d) x[b][t][d] = token_emb[idx2d(tok, d, D)] + pos_emb[idx2d(t, d, D)];
                 }
             }
 
@@ -352,13 +357,13 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<vector<double>>> v_all(B, vector<vector<double>>(T, vector<double>(D, 0.0)));
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < D; ++i) {
-                    for (int j = 0; j < D; ++j) q_last[b][i] += Wq[i][j] * x[b][last][j];
+                    for (int j = 0; j < D; ++j) q_last[b][i] += Wq[idx2d(i, j, D)] * x[b][last][j];
                 }
                 for (int t = 0; t < T; ++t) {
                     for (int i = 0; i < D; ++i) {
                         for (int j = 0; j < D; ++j) {
-                            k_all[b][t][i] += Wk[i][j] * x[b][t][j];
-                            v_all[b][t][i] += Wv[i][j] * x[b][t][j];
+                            k_all[b][t][i] += Wk[idx2d(i, j, D)] * x[b][t][j];
+                            v_all[b][t][i] += Wv[idx2d(i, j, D)] * x[b][t][j];
                         }
                     }
                 }
@@ -384,7 +389,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> h1_norm(B, vector<double>(D, 0.0));
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < D; ++i) {
-                    for (int j = 0; j < D; ++j) attn_out[b][i] += Wo[i][j] * head[b][j];
+                    for (int j = 0; j < D; ++j) attn_out[b][i] += Wo[idx2d(i, j, D)] * head[b][j];
                     pre1[b][i] = x[b][last][i] + attn_out[b][i];
                 }
                 h1_norm[b] = layer_norm_forward(pre1[b], ln1_gamma, ln1_beta);
@@ -398,13 +403,13 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < FF; ++i) {
                     double z = bff1[i];
-                    for (int j = 0; j < D; ++j) z += Wff1[i][j] * h1_norm[b][j];
+                    for (int j = 0; j < D; ++j) z += Wff1[idx2d(i, j, D)] * h1_norm[b][j];
                     ff_pre[b][i] = z;
                     ff[b][i] = z > 0.0 ? z : 0.0;
                 }
                 for (int i = 0; i < D; ++i) {
                     double z = bff2[i];
-                    for (int j = 0; j < FF; ++j) z += Wff2[i][j] * ff[b][j];
+                    for (int j = 0; j < FF; ++j) z += Wff2[idx2d(i, j, FF)] * ff[b][j];
                     ff2[b][i] = z;
                     pre2[b][i] = h1_norm[b][i] + z;
                 }
@@ -416,7 +421,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                 vector<double> logits(vocab, 0.0);
                 for (int k = 0; k < vocab; ++k) {
                     double z = bout[k];
-                    for (int j = 0; j < D; ++j) z += Wout[k][j] * h2_norm[b][j];
+                    for (int j = 0; j < D; ++j) z += Wout[idx2d(k, j, D)] * h2_norm[b][j];
                     logits[k] = z;
                 }
                 y[b] = softmax(logits);
@@ -448,7 +453,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                     gbout_sum[k] += dz[k];
                     for (int j = 0; j < D; ++j) {
                         gWout_sum[k][j] += dz[k] * h2_norm[b][j];
-                        dh2_norm[j] += Wout[k][j] * dz[k];
+                        dh2_norm[j] += Wout[idx2d(k, j, D)] * dz[k];
                     }
                 }
 
@@ -463,7 +468,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                     gbff2_sum[i] += dff2[i];
                     for (int j = 0; j < FF; ++j) {
                         gWff2_sum[i][j] += dff2[i] * ff[b][j];
-                        dff[j] += Wff2[i][j] * dff2[i];
+                        dff[j] += Wff2[idx2d(i, j, FF)] * dff2[i];
                     }
                 }
 
@@ -473,7 +478,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                     gbff1_sum[i] += dff_pre[i];
                     for (int j = 0; j < D; ++j) {
                         gWff1_sum[i][j] += dff_pre[i] * h1_norm[b][j];
-                        dh1_norm[j] += Wff1[i][j] * dff_pre[i];
+                        dh1_norm[j] += Wff1[idx2d(i, j, D)] * dff_pre[i];
                     }
                 }
 
@@ -493,7 +498,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                 for (int i = 0; i < D; ++i) {
                     for (int j = 0; j < D; ++j) {
                         gWo_sum[i][j] += dpre1[i] * head[b][j];
-                        dhead[j] += Wo[i][j] * dpre1[i];
+                        dhead[j] += Wo[idx2d(i, j, D)] * dpre1[i];
                     }
                 }
 
@@ -523,7 +528,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                 for (int i = 0; i < D; ++i) {
                     for (int j = 0; j < D; ++j) {
                         gWq_sum[i][j] += dq_last[i] * x[b][last][j];
-                        dx_last[j] += Wq[i][j] * dq_last[i];
+                        dx_last[j] += Wq[idx2d(i, j, D)] * dq_last[i];
                     }
                 }
 
@@ -533,7 +538,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                         for (int j = 0; j < D; ++j) {
                             gWk_sum[i][j] += dk_all[t][i] * x[b][t][j];
                             gWv_sum[i][j] += dv_all[t][i] * x[b][t][j];
-                            dx_all[t][j] += Wk[i][j] * dk_all[t][i] + Wv[i][j] * dv_all[t][i];
+                            dx_all[t][j] += Wk[idx2d(i, j, D)] * dk_all[t][i] + Wv[idx2d(i, j, D)] * dv_all[t][i];
                         }
                     }
                 }
@@ -549,17 +554,17 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             }
 
             for (int k = 0; k < vocab; ++k) {
-                for (int j = 0; j < D; ++j) Wout[k][j] -= step_lr * gWout_sum[k][j];
+                for (int j = 0; j < D; ++j) Wout[idx2d(k, j, D)] -= step_lr * gWout_sum[k][j];
                 bout[k] -= step_lr * gbout_sum[k];
             }
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
-                    Wo[i][j] -= step_lr * gWo_sum[i][j];
-                    Wq[i][j] -= step_lr * gWq_sum[i][j];
-                    Wk[i][j] -= step_lr * gWk_sum[i][j];
-                    Wv[i][j] -= step_lr * gWv_sum[i][j];
+                    Wo[idx2d(i, j, D)] -= step_lr * gWo_sum[i][j];
+                    Wq[idx2d(i, j, D)] -= step_lr * gWq_sum[i][j];
+                    Wk[idx2d(i, j, D)] -= step_lr * gWk_sum[i][j];
+                    Wv[idx2d(i, j, D)] -= step_lr * gWv_sum[i][j];
                 }
-                for (int j = 0; j < FF; ++j) Wff2[i][j] -= step_lr * gWff2_sum[i][j];
+                for (int j = 0; j < FF; ++j) Wff2[idx2d(i, j, FF)] -= step_lr * gWff2_sum[i][j];
                 bff2[i] -= step_lr * gbff2_sum[i];
 
                 ln1_gamma[i] -= step_lr * gln1_gamma_sum[i];
@@ -568,14 +573,14 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
                 ln2_beta[i] -= step_lr * gln2_beta_sum[i];
             }
             for (int i = 0; i < FF; ++i) {
-                for (int j = 0; j < D; ++j) Wff1[i][j] -= step_lr * gWff1_sum[i][j];
+                for (int j = 0; j < D; ++j) Wff1[idx2d(i, j, D)] -= step_lr * gWff1_sum[i][j];
                 bff1[i] -= step_lr * gbff1_sum[i];
             }
             for (int tok = 0; tok < vocab; ++tok) {
-                for (int d = 0; d < D; ++d) token_emb[tok][d] -= step_lr * dtoken_emb_sum[tok][d];
+                for (int d = 0; d < D; ++d) token_emb[idx2d(tok, d, D)] -= step_lr * dtoken_emb_sum[tok][d];
             }
             for (int t = 0; t < T; ++t) {
-                for (int d = 0; d < D; ++d) pos_emb[t][d] -= step_lr * dpos_emb_sum[t][d];
+                for (int d = 0; d < D; ++d) pos_emb[idx2d(t, d, D)] -= step_lr * dpos_emb_sum[t][d];
             }
         }
 
@@ -596,7 +601,7 @@ string ChatModel::generate(const vector<int> &context, int length, double temper
         vector<double> logits(vocab);
         for (int k = 0; k < vocab; ++k) {
             double z = bout[k];
-            for (int j = 0; j < D; ++j) z += Wout[k][j] * h_last[j];
+            for (int j = 0; j < D; ++j) z += Wout[idx2d(k, j, D)] * h_last[j];
             logits[k] = z;
         }
 

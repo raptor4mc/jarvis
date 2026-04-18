@@ -1,6 +1,7 @@
 #ifndef MODEL_H
 #define MODEL_H
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -16,21 +17,23 @@ public:
     std::string generate(const std::vector<int> &context, int length, double temperature, bool deterministic) const;
 
 private:
+    static size_t idx2d(int r, int c, int cols);
+
     int vocab;
     int D;
     int T;
     int FF;
 
-    std::vector<std::vector<double>> token_emb; // vocab x D
-    std::vector<std::vector<double>> pos_emb;   // T x D
+    std::vector<double> token_emb; // vocab x D
+    std::vector<double> pos_emb;   // T x D
 
     // Single-head self-attention block parameters.
-    std::vector<std::vector<double>> Wq, Wk, Wv, Wo; // D x D
+    std::vector<double> Wq, Wk, Wv, Wo; // D x D
 
     // Feed-forward network parameters.
-    std::vector<std::vector<double>> Wff1; // FF x D
+    std::vector<double> Wff1;              // FF x D
     std::vector<double> bff1;              // FF
-    std::vector<std::vector<double>> Wff2; // D x FF
+    std::vector<double> Wff2;              // D x FF
     std::vector<double> bff2;              // D
 
     // LayerNorm parameters (post-attention and post-FFN).
@@ -38,7 +41,7 @@ private:
     std::vector<double> ln2_gamma, ln2_beta; // D
 
     // LM head.
-    std::vector<std::vector<double>> Wout; // vocab x D
+    std::vector<double> Wout;              // vocab x D
     std::vector<double> bout;              // vocab
 
     static double rand_weight();
