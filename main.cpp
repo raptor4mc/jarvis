@@ -40,7 +40,7 @@ int main() {
     const int vocab = 256;
     const int model_dim = 64;
     const int seq_len = 32;
-    const double learning_rate = 0.05;
+    const float learning_rate = 0.05f;
     const int epochs_if_loaded = 10;
     const int epochs_if_fresh = 50;
     const int batch_size = 16;
