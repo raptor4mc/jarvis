@@ -43,7 +43,7 @@ int main() {
     const double learning_rate = 0.05;
     const int epochs_if_loaded = 10;
     const int epochs_if_fresh = 50;
-    const int batch_size = 8;
+    const int batch_size = 16;
     const string weights_file = "weights.bin";
 
     cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
