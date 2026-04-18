@@ -370,6 +370,11 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
 
+    if (batch_size <= 4) batch_size = 4;
+    else if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
     samples.reserve(data.size());
@@ -378,7 +383,14 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
         samples.push_back({ctx, data[i + T]});
     }
 
-    cout << "Samples: " << samples.size() << ", batch size: " << batch_size << endl;
+    int grad_accum_steps = 1;
+    if (batch_size == 4) grad_accum_steps = 4;      // effective batch 16
+    else if (batch_size == 8) grad_accum_steps = 2; // effective batch 16
+
+    cout << "Samples: " << samples.size()
+         << ", micro-batch size: " << batch_size
+         << ", grad_accum_steps: " << grad_accum_steps
+         << ", effective batch: " << (batch_size * grad_accum_steps) << endl;
 
     const float scale = 1.0f / sqrtf((float)D);
     int last = T - 1;
@@ -386,10 +398,26 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
     for (int ep = 0; ep < epochs; ++ep) {
         float total_loss = 0.0f;
 
+        vector<vector<float>> gWout_accum(vocab, vector<float>(D, 0.0f));
+        vector<float> gbout_accum(vocab, 0.0f);
+        vector<vector<float>> gWo_accum(D, vector<float>(D, 0.0f));
+        vector<vector<float>> gWq_accum(D, vector<float>(D, 0.0f));
+        vector<vector<float>> gWk_accum(D, vector<float>(D, 0.0f));
+        vector<vector<float>> gWv_accum(D, vector<float>(D, 0.0f));
+        vector<vector<float>> gWff1_accum(FF, vector<float>(D, 0.0f));
+        vector<float> gbff1_accum(FF, 0.0f);
+        vector<vector<float>> gWff2_accum(D, vector<float>(FF, 0.0f));
+        vector<float> gbff2_accum(D, 0.0f);
+        vector<float> gln1_gamma_accum(D, 0.0f), gln1_beta_accum(D, 0.0f);
+        vector<float> gln2_gamma_accum(D, 0.0f), gln2_beta_accum(D, 0.0f);
+        vector<vector<float>> dtoken_emb_accum(vocab, vector<float>(D, 0.0f));
+        vector<vector<float>> dpos_emb_accum(T, vector<float>(D, 0.0f));
+        int accum_samples = 0;
+        int accum_steps = 0;
+
         for (size_t batch_start = 0; batch_start < samples.size(); batch_start += (size_t)batch_size) {
             size_t batch_end = min(samples.size(), batch_start + (size_t)batch_size);
             int B = (int)(batch_end - batch_start);
-            float step_lr = lr / (float)B;
 
             vector<vector<int>> batch_ctx(B, vector<int>(T));
             vector<int> batch_target(B);
@@ -593,42 +621,99 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                         dpos_emb_sum[t][d] += dx_all[t][d];
                     }
                 }
+
+            for (int k = 0; k < vocab; ++k) {
+                gbout_accum[k] += gbout_sum[k];
+                for (int j = 0; j < D; ++j) gWout_accum[k][j] += gWout_sum[k][j];
+            }
+            for (int i = 0; i < D; ++i) {
+                gbff2_accum[i] += gbff2_sum[i];
+                gln1_gamma_accum[i] += gln1_gamma_sum[i];
+                gln1_beta_accum[i] += gln1_beta_sum[i];
+                gln2_gamma_accum[i] += gln2_gamma_sum[i];
+                gln2_beta_accum[i] += gln2_beta_sum[i];
+                for (int j = 0; j < D; ++j) {
+                    gWo_accum[i][j] += gWo_sum[i][j];
+                    gWq_accum[i][j] += gWq_sum[i][j];
+                    gWk_accum[i][j] += gWk_sum[i][j];
+                    gWv_accum[i][j] += gWv_sum[i][j];
+                }
+                for (int j = 0; j < FF; ++j) gWff2_accum[i][j] += gWff2_sum[i][j];
+            }
+            for (int i = 0; i < FF; ++i) {
+                gbff1_accum[i] += gbff1_sum[i];
+                for (int j = 0; j < D; ++j) gWff1_accum[i][j] += gWff1_sum[i][j];
+            }
+            for (int tok = 0; tok < vocab; ++tok) {
+                for (int d = 0; d < D; ++d) dtoken_emb_accum[tok][d] += dtoken_emb_sum[tok][d];
+            }
+            for (int t = 0; t < T; ++t) {
+                for (int d = 0; d < D; ++d) dpos_emb_accum[t][d] += dpos_emb_sum[t][d];
             }
 
+            accum_samples += B;
+            accum_steps += 1;
+            bool should_step = (accum_steps >= grad_accum_steps) || (batch_end == samples.size());
+            if (!should_step) continue;
+
+            float step_lr = lr / (float)accum_samples;
             #pragma omp parallel for schedule(static)
             for (int k = 0; k < vocab; ++k) {
-                for (int j = 0; j < D; ++j) Wout[idx2d(k, j, D)] -= step_lr * gWout_sum[k][j];
-                bout[k] -= step_lr * gbout_sum[k];
+                for (int j = 0; j < D; ++j) Wout[idx2d(k, j, D)] -= step_lr * gWout_accum[k][j];
+                bout[k] -= step_lr * gbout_accum[k];
             }
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
-                    Wo[idx2d(i, j, D)] -= step_lr * gWo_sum[i][j];
-                    Wq[idx2d(i, j, D)] -= step_lr * gWq_sum[i][j];
-                    Wk[idx2d(i, j, D)] -= step_lr * gWk_sum[i][j];
-                    Wv[idx2d(i, j, D)] -= step_lr * gWv_sum[i][j];
+                    Wo[idx2d(i, j, D)] -= step_lr * gWo_accum[i][j];
+                    Wq[idx2d(i, j, D)] -= step_lr * gWq_accum[i][j];
+                    Wk[idx2d(i, j, D)] -= step_lr * gWk_accum[i][j];
+                    Wv[idx2d(i, j, D)] -= step_lr * gWv_accum[i][j];
                 }
-                for (int j = 0; j < FF; ++j) Wff2[idx2d(i, j, FF)] -= step_lr * gWff2_sum[i][j];
-                bff2[i] -= step_lr * gbff2_sum[i];
+                for (int j = 0; j < FF; ++j) Wff2[idx2d(i, j, FF)] -= step_lr * gWff2_accum[i][j];
+                bff2[i] -= step_lr * gbff2_accum[i];
 
-                ln1_gamma[i] -= step_lr * gln1_gamma_sum[i];
-                ln1_beta[i] -= step_lr * gln1_beta_sum[i];
-                ln2_gamma[i] -= step_lr * gln2_gamma_sum[i];
-                ln2_beta[i] -= step_lr * gln2_beta_sum[i];
+                ln1_gamma[i] -= step_lr * gln1_gamma_accum[i];
+                ln1_beta[i] -= step_lr * gln1_beta_accum[i];
+                ln2_gamma[i] -= step_lr * gln2_gamma_accum[i];
+                ln2_beta[i] -= step_lr * gln2_beta_accum[i];
             }
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < FF; ++i) {
-                for (int j = 0; j < D; ++j) Wff1[idx2d(i, j, D)] -= step_lr * gWff1_sum[i][j];
-                bff1[i] -= step_lr * gbff1_sum[i];
+                for (int j = 0; j < D; ++j) Wff1[idx2d(i, j, D)] -= step_lr * gWff1_accum[i][j];
+                bff1[i] -= step_lr * gbff1_accum[i];
             }
             #pragma omp parallel for schedule(static)
             for (int tok = 0; tok < vocab; ++tok) {
-                for (int d = 0; d < D; ++d) token_emb[idx2d(tok, d, D)] -= step_lr * dtoken_emb_sum[tok][d];
+                for (int d = 0; d < D; ++d) token_emb[idx2d(tok, d, D)] -= step_lr * dtoken_emb_accum[tok][d];
             }
             #pragma omp parallel for schedule(static)
             for (int t = 0; t < T; ++t) {
-                for (int d = 0; d < D; ++d) pos_emb[idx2d(t, d, D)] -= step_lr * dpos_emb_sum[t][d];
+                for (int d = 0; d < D; ++d) pos_emb[idx2d(t, d, D)] -= step_lr * dpos_emb_accum[t][d];
             }
+
+            for (int k = 0; k < vocab; ++k) {
+                gbout_accum[k] = 0.0f;
+                fill(gWout_accum[k].begin(), gWout_accum[k].end(), 0.0f);
+            }
+            for (int i = 0; i < D; ++i) {
+                gbff2_accum[i] = 0.0f;
+                gln1_gamma_accum[i] = gln1_beta_accum[i] = 0.0f;
+                gln2_gamma_accum[i] = gln2_beta_accum[i] = 0.0f;
+                fill(gWo_accum[i].begin(), gWo_accum[i].end(), 0.0f);
+                fill(gWq_accum[i].begin(), gWq_accum[i].end(), 0.0f);
+                fill(gWk_accum[i].begin(), gWk_accum[i].end(), 0.0f);
+                fill(gWv_accum[i].begin(), gWv_accum[i].end(), 0.0f);
+                fill(gWff2_accum[i].begin(), gWff2_accum[i].end(), 0.0f);
+            }
+            for (int i = 0; i < FF; ++i) {
+                gbff1_accum[i] = 0.0f;
+                fill(gWff1_accum[i].begin(), gWff1_accum[i].end(), 0.0f);
+            }
+            for (int tok = 0; tok < vocab; ++tok) fill(dtoken_emb_accum[tok].begin(), dtoken_emb_accum[tok].end(), 0.0f);
+            for (int t = 0; t < T; ++t) fill(dpos_emb_accum[t].begin(), dpos_emb_accum[t].end(), 0.0f);
+            accum_samples = 0;
+            accum_steps = 0;
         }
 
         float avg_loss = total_loss / (float)samples.size();
