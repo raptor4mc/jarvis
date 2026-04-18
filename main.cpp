@@ -40,9 +40,10 @@ int main() {
     const int vocab = 256;
     const int model_dim = 64;
     const int seq_len = 32;
-    const double learning_rate = 0.05;
+    const float learning_rate = 0.05f;
     const int epochs_if_loaded = 10;
     const int epochs_if_fresh = 50;
+    const int batch_size = 16;
     const string weights_file = "weights.bin";
 
     cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
@@ -59,7 +60,7 @@ int main() {
              << epochs_to_train << " epochs from scratch...\n";
     }
 
-    model.train(data, epochs_to_train, learning_rate);
+    model.train(data, epochs_to_train, learning_rate, batch_size);
 
     if (model.save_weights(weights_file)) {
         cout << "Saved weights to " << weights_file << ".\n";
