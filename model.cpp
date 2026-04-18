@@ -6,8 +6,48 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 using namespace std;
+
+static inline double dot_simd(const double *a, const double *b, int n) {
+#if defined(__AVX2__)
+    __m256d acc = _mm256_setzero_pd();
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        __m256d av = _mm256_loadu_pd(a + i);
+        __m256d bv = _mm256_loadu_pd(b + i);
+        acc = _mm256_add_pd(acc, _mm256_mul_pd(av, bv));
+    }
+    alignas(32) double tmp[4];
+    _mm256_store_pd(tmp, acc);
+    double sum = tmp[0] + tmp[1] + tmp[2] + tmp[3];
+    for (; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+#else
+    double sum = 0.0;
+    for (int i = 0; i < n; ++i) sum += a[i] * b[i];
+    return sum;
+#endif
+}
+
+static inline void axpy_simd(double *y, const double *x, double alpha, int n) {
+#if defined(__AVX2__)
+    __m256d aval = _mm256_set1_pd(alpha);
+    int i = 0;
+    for (; i + 3 < n; i += 4) {
+        __m256d yv = _mm256_loadu_pd(y + i);
+        __m256d xv = _mm256_loadu_pd(x + i);
+        yv = _mm256_add_pd(yv, _mm256_mul_pd(aval, xv));
+        _mm256_storeu_pd(y + i, yv);
+    }
+    for (; i < n; ++i) y[i] += alpha * x[i];
+#else
+    for (int i = 0; i < n; ++i) y[i] += alpha * x[i];
+#endif
+}
 
 ChatModel::ChatModel(int vocab_size, int model_dim, int seq_len)
     : vocab(vocab_size), D(model_dim), T(seq_len), FF(model_dim * 2),
@@ -174,15 +214,9 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     vector<vector<double>> q(T, vector<double>(D)), k(T, vector<double>(D)), v(T, vector<double>(D));
     for (int t = 0; t < T; ++t) {
         for (int i = 0; i < D; ++i) {
-            double qv = 0.0, kv = 0.0, vv = 0.0;
-            for (int j = 0; j < D; ++j) {
-                qv += Wq[idx2d(i, j, D)] * x[t][j];
-                kv += Wk[idx2d(i, j, D)] * x[t][j];
-                vv += Wv[idx2d(i, j, D)] * x[t][j];
-            }
-            q[t][i] = qv;
-            k[t][i] = kv;
-            v[t][i] = vv;
+            q[t][i] = dot_simd(&Wq[idx2d(i, 0, D)], x[t].data(), D);
+            k[t][i] = dot_simd(&Wk[idx2d(i, 0, D)], x[t].data(), D);
+            v[t][i] = dot_simd(&Wv[idx2d(i, 0, D)], x[t].data(), D);
         }
     }
 
@@ -192,21 +226,15 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     for (int t = 0; t < T; ++t) {
         vector<double> scores(T, -1e9);
         for (int j = 0; j <= t; ++j) {
-            double dot = 0.0;
-            for (int d = 0; d < D; ++d) dot += q[t][d] * k[j][d];
-            scores[j] = dot * scale;
+            scores[j] = dot_simd(q[t].data(), k[j].data(), D) * scale;
         }
         vector<double> a = softmax(scores);
 
         vector<double> head(D, 0.0);
-        for (int j = 0; j <= t; ++j) {
-            for (int d = 0; d < D; ++d) head[d] += a[j] * v[j][d];
-        }
+        for (int j = 0; j <= t; ++j) axpy_simd(head.data(), v[j].data(), a[j], D);
 
         for (int i = 0; i < D; ++i) {
-            double out = 0.0;
-            for (int j = 0; j < D; ++j) out += Wo[idx2d(i, j, D)] * head[j];
-            attn_out[t][i] = out;
+            attn_out[t][i] = dot_simd(&Wo[idx2d(i, 0, D)], head.data(), D);
         }
     }
 
@@ -223,14 +251,12 @@ vector<double> ChatModel::forward_last_hidden(const vector<int> &tokens) const {
     for (int t = 0; t < T; ++t) {
         vector<double> ff(FF, 0.0);
         for (int i = 0; i < FF; ++i) {
-            double z = bff1[i];
-            for (int j = 0; j < D; ++j) z += Wff1[idx2d(i, j, D)] * h1[t][j];
+            double z = bff1[i] + dot_simd(&Wff1[idx2d(i, 0, D)], h1[t].data(), D);
             ff[i] = z > 0.0 ? z : 0.0; // ReLU
         }
 
         for (int i = 0; i < D; ++i) {
-            double z = bff2[i];
-            for (int j = 0; j < FF; ++j) z += Wff2[idx2d(i, j, FF)] * ff[j];
+            double z = bff2[i] + dot_simd(&Wff2[idx2d(i, 0, FF)], ff.data(), FF);
             h2[t][i] = h1[t][i] + z;
         }
         h2[t] = layer_norm_forward(h2[t], ln2_gamma, ln2_beta);
@@ -315,6 +341,10 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
 
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
     samples.reserve(data.size());
@@ -357,14 +387,12 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<vector<double>>> v_all(B, vector<vector<double>>(T, vector<double>(D, 0.0)));
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < D; ++i) {
-                    for (int j = 0; j < D; ++j) q_last[b][i] += Wq[idx2d(i, j, D)] * x[b][last][j];
+                    q_last[b][i] = dot_simd(&Wq[idx2d(i, 0, D)], x[b][last].data(), D);
                 }
                 for (int t = 0; t < T; ++t) {
                     for (int i = 0; i < D; ++i) {
-                        for (int j = 0; j < D; ++j) {
-                            k_all[b][t][i] += Wk[idx2d(i, j, D)] * x[b][t][j];
-                            v_all[b][t][i] += Wv[idx2d(i, j, D)] * x[b][t][j];
-                        }
+                        k_all[b][t][i] = dot_simd(&Wk[idx2d(i, 0, D)], x[b][t].data(), D);
+                        v_all[b][t][i] = dot_simd(&Wv[idx2d(i, 0, D)], x[b][t].data(), D);
                     }
                 }
             }
@@ -374,14 +402,10 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             for (int b = 0; b < B; ++b) {
                 vector<double> scores(T);
                 for (int t = 0; t < T; ++t) {
-                    double dot = 0.0;
-                    for (int d = 0; d < D; ++d) dot += q_last[b][d] * k_all[b][t][d];
-                    scores[t] = dot * scale;
+                    scores[t] = dot_simd(q_last[b].data(), k_all[b][t].data(), D) * scale;
                 }
                 a[b] = softmax(scores);
-                for (int t = 0; t < T; ++t) {
-                    for (int d = 0; d < D; ++d) head[b][d] += a[b][t] * v_all[b][t][d];
-                }
+                for (int t = 0; t < T; ++t) axpy_simd(head[b].data(), v_all[b][t].data(), a[b][t], D);
             }
 
             vector<vector<double>> attn_out(B, vector<double>(D, 0.0));
@@ -389,7 +413,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> h1_norm(B, vector<double>(D, 0.0));
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < D; ++i) {
-                    for (int j = 0; j < D; ++j) attn_out[b][i] += Wo[idx2d(i, j, D)] * head[b][j];
+                    attn_out[b][i] = dot_simd(&Wo[idx2d(i, 0, D)], head[b].data(), D);
                     pre1[b][i] = x[b][last][i] + attn_out[b][i];
                 }
                 h1_norm[b] = layer_norm_forward(pre1[b], ln1_gamma, ln1_beta);
@@ -402,14 +426,12 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             vector<vector<double>> h2_norm(B, vector<double>(D, 0.0));
             for (int b = 0; b < B; ++b) {
                 for (int i = 0; i < FF; ++i) {
-                    double z = bff1[i];
-                    for (int j = 0; j < D; ++j) z += Wff1[idx2d(i, j, D)] * h1_norm[b][j];
+                    double z = bff1[i] + dot_simd(&Wff1[idx2d(i, 0, D)], h1_norm[b].data(), D);
                     ff_pre[b][i] = z;
                     ff[b][i] = z > 0.0 ? z : 0.0;
                 }
                 for (int i = 0; i < D; ++i) {
-                    double z = bff2[i];
-                    for (int j = 0; j < FF; ++j) z += Wff2[idx2d(i, j, FF)] * ff[b][j];
+                    double z = bff2[i] + dot_simd(&Wff2[idx2d(i, 0, FF)], ff[b].data(), FF);
                     ff2[b][i] = z;
                     pre2[b][i] = h1_norm[b][i] + z;
                 }
@@ -420,9 +442,7 @@ void ChatModel::train(const vector<int> &data, int epochs, double lr, int batch_
             for (int b = 0; b < B; ++b) {
                 vector<double> logits(vocab, 0.0);
                 for (int k = 0; k < vocab; ++k) {
-                    double z = bout[k];
-                    for (int j = 0; j < D; ++j) z += Wout[idx2d(k, j, D)] * h2_norm[b][j];
-                    logits[k] = z;
+                    logits[k] = bout[k] + dot_simd(&Wout[idx2d(k, 0, D)], h2_norm[b].data(), D);
                 }
                 y[b] = softmax(logits);
                 total_loss += -log(y[b][batch_target[b]] + 1e-12);
@@ -600,9 +620,7 @@ string ChatModel::generate(const vector<int> &context, int length, double temper
 
         vector<double> logits(vocab);
         for (int k = 0; k < vocab; ++k) {
-            double z = bout[k];
-            for (int j = 0; j < D; ++j) z += Wout[idx2d(k, j, D)] * h_last[j];
-            logits[k] = z;
+            logits[k] = bout[k] + dot_simd(&Wout[idx2d(k, 0, D)], h_last.data(), D);
         }
 
         int next_idx = sample_next_token(logits, temperature, deterministic);
