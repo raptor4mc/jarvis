@@ -46,13 +46,24 @@ int main() {
     const int num_layers = 2;
     const int seq_len = 32;
     const float learning_rate = 0.001f;
-    const int epochs_if_loaded = 2;
-    const int epochs_if_fresh = 15;
-    const int batch_size = 32;
-    int sample_stride = 1;
+    int epochs_if_loaded = 1;
+    int epochs_if_fresh = 6;
+    int batch_size = 32;
+    int sample_stride = 2;
     if (const char *env_stride = getenv("JARVIS_SAMPLE_STRIDE")) {
         int parsed = atoi(env_stride);
         if (parsed > 0) sample_stride = parsed;
+    }
+    if (const char *env_epochs = getenv("JARVIS_EPOCHS")) {
+        int parsed = atoi(env_epochs);
+        if (parsed > 0) {
+            epochs_if_loaded = parsed;
+            epochs_if_fresh = parsed;
+        }
+    }
+    if (const char *env_batch = getenv("JARVIS_BATCH_SIZE")) {
+        int parsed = atoi(env_batch);
+        if (parsed > 0) batch_size = parsed;
     }
     int max_tokens = 0;
     if (const char *env_max_tokens = getenv("JARVIS_MAX_TOKENS")) {
