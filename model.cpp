@@ -439,6 +439,27 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
 
     const float scale = 1.0f / sqrtf((float)D);
     int last = T - 1;
+    const float beta1 = 0.9f;
+    const float beta2 = 0.999f;
+    const float adam_eps = 1e-8f;
+    int adam_step = 0;
+
+    vector<vector<float>> mWout(vocab, vector<float>(D, 0.0f)), vWout(vocab, vector<float>(D, 0.0f));
+    vector<float> mbout(vocab, 0.0f), vbout(vocab, 0.0f);
+    vector<vector<float>> mWo(D, vector<float>(D, 0.0f)), vWo(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWq(D, vector<float>(D, 0.0f)), vWq(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWk(D, vector<float>(D, 0.0f)), vWk(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWv(D, vector<float>(D, 0.0f)), vWv(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWff1(FF, vector<float>(D, 0.0f)), vWff1(FF, vector<float>(D, 0.0f));
+    vector<float> mbff1(FF, 0.0f), vbff1(FF, 0.0f);
+    vector<vector<float>> mWff2(D, vector<float>(FF, 0.0f)), vWff2(D, vector<float>(FF, 0.0f));
+    vector<float> mbff2(D, 0.0f), vbff2(D, 0.0f);
+    vector<float> mln1_gamma(D, 0.0f), vln1_gamma(D, 0.0f);
+    vector<float> mln1_beta(D, 0.0f), vln1_beta(D, 0.0f);
+    vector<float> mln2_gamma(D, 0.0f), vln2_gamma(D, 0.0f);
+    vector<float> mln2_beta(D, 0.0f), vln2_beta(D, 0.0f);
+    vector<vector<float>> mtoken_emb(vocab, vector<float>(D, 0.0f)), vtoken_emb(vocab, vector<float>(D, 0.0f));
+    vector<vector<float>> mpos_emb(T, vector<float>(D, 0.0f)), vpos_emb(T, vector<float>(D, 0.0f));
 
     for (int ep = 0; ep < epochs; ++ep) {
         float total_loss = 0.0f;
@@ -759,40 +780,78 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
             bool should_step = (accum_steps >= grad_accum_steps) || (batch_end == sample_starts.size());
             if (!should_step) continue;
 
-            float step_lr = lr / (float)accum_samples;
+            adam_step += 1;
+            float inv_samples = 1.0f / (float)accum_samples;
+            float bias_correction1 = 1.0f - powf(beta1, (float)adam_step);
+            float bias_correction2 = 1.0f - powf(beta2, (float)adam_step);
+
+            auto adam_update = [&](float &param, float grad, float &m, float &v) {
+                m = beta1 * m + (1.0f - beta1) * grad;
+                v = beta2 * v + (1.0f - beta2) * grad * grad;
+                float m_hat = m / bias_correction1;
+                float v_hat = v / bias_correction2;
+                param -= lr * (m_hat / (sqrtf(v_hat) + adam_eps));
+            };
+
             #pragma omp parallel for schedule(static)
             for (int k = 0; k < vocab; ++k) {
-                for (int j = 0; j < D; ++j) Wout[idx2d(k, j, D)] -= step_lr * gWout_accum[k][j];
-                bout[k] -= step_lr * gbout_accum[k];
+                for (int j = 0; j < D; ++j) {
+                    float g = gWout_accum[k][j] * inv_samples;
+                    adam_update(Wout[idx2d(k, j, D)], g, mWout[k][j], vWout[k][j]);
+                }
+                float gb = gbout_accum[k] * inv_samples;
+                adam_update(bout[k], gb, mbout[k], vbout[k]);
             }
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
-                    Wo[idx2d(i, j, D)] -= step_lr * gWo_accum[i][j];
-                    Wq[idx2d(i, j, D)] -= step_lr * gWq_accum[i][j];
-                    Wk[idx2d(i, j, D)] -= step_lr * gWk_accum[i][j];
-                    Wv[idx2d(i, j, D)] -= step_lr * gWv_accum[i][j];
+                    float gwo = gWo_accum[i][j] * inv_samples;
+                    float gwq = gWq_accum[i][j] * inv_samples;
+                    float gwk = gWk_accum[i][j] * inv_samples;
+                    float gwv = gWv_accum[i][j] * inv_samples;
+                    adam_update(Wo[idx2d(i, j, D)], gwo, mWo[i][j], vWo[i][j]);
+                    adam_update(Wq[idx2d(i, j, D)], gwq, mWq[i][j], vWq[i][j]);
+                    adam_update(Wk[idx2d(i, j, D)], gwk, mWk[i][j], vWk[i][j]);
+                    adam_update(Wv[idx2d(i, j, D)], gwv, mWv[i][j], vWv[i][j]);
                 }
-                for (int j = 0; j < FF; ++j) Wff2[idx2d(i, j, FF)] -= step_lr * gWff2_accum[i][j];
-                bff2[i] -= step_lr * gbff2_accum[i];
+                for (int j = 0; j < FF; ++j) {
+                    float gwff2 = gWff2_accum[i][j] * inv_samples;
+                    adam_update(Wff2[idx2d(i, j, FF)], gwff2, mWff2[i][j], vWff2[i][j]);
+                }
+                float gb2 = gbff2_accum[i] * inv_samples;
+                adam_update(bff2[i], gb2, mbff2[i], vbff2[i]);
 
-                ln1_gamma[i] -= step_lr * gln1_gamma_accum[i];
-                ln1_beta[i] -= step_lr * gln1_beta_accum[i];
-                ln2_gamma[i] -= step_lr * gln2_gamma_accum[i];
-                ln2_beta[i] -= step_lr * gln2_beta_accum[i];
+                float gln1g = gln1_gamma_accum[i] * inv_samples;
+                float gln1b = gln1_beta_accum[i] * inv_samples;
+                float gln2g = gln2_gamma_accum[i] * inv_samples;
+                float gln2b = gln2_beta_accum[i] * inv_samples;
+                adam_update(ln1_gamma[i], gln1g, mln1_gamma[i], vln1_gamma[i]);
+                adam_update(ln1_beta[i], gln1b, mln1_beta[i], vln1_beta[i]);
+                adam_update(ln2_gamma[i], gln2g, mln2_gamma[i], vln2_gamma[i]);
+                adam_update(ln2_beta[i], gln2b, mln2_beta[i], vln2_beta[i]);
             }
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < FF; ++i) {
-                for (int j = 0; j < D; ++j) Wff1[idx2d(i, j, D)] -= step_lr * gWff1_accum[i][j];
-                bff1[i] -= step_lr * gbff1_accum[i];
+                for (int j = 0; j < D; ++j) {
+                    float gwff1 = gWff1_accum[i][j] * inv_samples;
+                    adam_update(Wff1[idx2d(i, j, D)], gwff1, mWff1[i][j], vWff1[i][j]);
+                }
+                float gb1 = gbff1_accum[i] * inv_samples;
+                adam_update(bff1[i], gb1, mbff1[i], vbff1[i]);
             }
             #pragma omp parallel for schedule(static)
             for (int tok = 0; tok < vocab; ++tok) {
-                for (int d = 0; d < D; ++d) token_emb[idx2d(tok, d, D)] -= step_lr * dtoken_emb_accum[tok][d];
+                for (int d = 0; d < D; ++d) {
+                    float gte = dtoken_emb_accum[tok][d] * inv_samples;
+                    adam_update(token_emb[idx2d(tok, d, D)], gte, mtoken_emb[tok][d], vtoken_emb[tok][d]);
+                }
             }
             #pragma omp parallel for schedule(static)
             for (int t = 0; t < T; ++t) {
-                for (int d = 0; d < D; ++d) pos_emb[idx2d(t, d, D)] -= step_lr * dpos_emb_accum[t][d];
+                for (int d = 0; d < D; ++d) {
+                    float gpe = dpos_emb_accum[t][d] * inv_samples;
+                    adam_update(pos_emb[idx2d(t, d, D)], gpe, mpos_emb[t][d], vpos_emb[t][d]);
+                }
             }
 
             for (int k = 0; k < vocab; ++k) {
