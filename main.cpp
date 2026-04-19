@@ -38,7 +38,9 @@ int main() {
     }
 
     const int vocab = 256;
-    const int model_dim = 64;
+    const int model_dim = 128;
+    const int num_heads = 4;
+    const int num_layers = 2;
     const int seq_len = 32;
     const float learning_rate = 0.05f;
     const int epochs_if_loaded = 10;
@@ -46,7 +48,12 @@ int main() {
     const int batch_size = 16;
     const string weights_file = "weights.bin";
 
-    cout << "Vocab size: " << vocab << ", training tokens: " << data.size() << endl;
+    cout << "Vocab size: " << vocab
+         << ", training tokens: " << data.size()
+         << ", model_dim: " << model_dim
+         << ", num_heads: " << num_heads
+         << ", num_layers: " << num_layers
+         << ", ff_dim: " << (model_dim * 4) << endl;
 
     ChatModel model(vocab, model_dim, seq_len);
 

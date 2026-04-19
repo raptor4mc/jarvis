@@ -64,7 +64,7 @@ static inline void matvec_rm(const float *A, const float *x, float *y, int rows,
 }
 
 ChatModel::ChatModel(int vocab_size, int model_dim, int seq_len)
-    : vocab(vocab_size), D(model_dim), T(seq_len), FF(model_dim * 2),
+    : vocab(vocab_size), D(model_dim), T(seq_len), FF(model_dim * 4),
       token_emb(vocab * D),
       pos_emb(T * D),
       Wq(D * D), Wk(D * D), Wv(D * D), Wo(D * D),
@@ -367,6 +367,11 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
     else batch_size = 32;
 
     if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 4) batch_size = 4;
+    else if (batch_size <= 8) batch_size = 8;
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
 
