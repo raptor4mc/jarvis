@@ -63,6 +63,13 @@ static inline void matvec_rm(const float *A, const float *x, float *y, int rows,
 #endif
 }
 
+static inline int snap_batch_size(int batch_size) {
+    if (batch_size <= 4) return 4;
+    if (batch_size <= 8) return 8;
+    if (batch_size <= 16) return 16;
+    return 32;
+}
+
 ChatModel::ChatModel(int vocab_size, int model_dim, int seq_len)
     : vocab(vocab_size), D(model_dim), T(seq_len), FF(model_dim * 4),
       token_emb(vocab * D),
@@ -384,6 +391,8 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
     else if (batch_size <= 8) batch_size = 8;
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
+
+    batch_size = snap_batch_size(batch_size);
 
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
