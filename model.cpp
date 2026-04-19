@@ -63,6 +63,37 @@ static inline void matvec_rm(const float *A, const float *x, float *y, int rows,
 #endif
 }
 
+// Computes Y = X * A^T where:
+//   X is [batch_rows x cols] row-major
+//   A is [rows x cols] row-major
+//   Y is [batch_rows x rows] row-major
+static inline void matmul_batch_rm(const float *A, const float *X, float *Y, int batch_rows, int rows, int cols) {
+#if defined(USE_CBLAS)
+    cblas_sgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasTrans,
+        batch_rows,
+        rows,
+        cols,
+        1.0f,
+        X,
+        cols,
+        A,
+        cols,
+        0.0f,
+        Y,
+        rows);
+#else
+    #pragma omp parallel for schedule(static)
+    for (int br = 0; br < batch_rows; ++br) {
+        const float *x = X + (size_t)br * cols;
+        float *y = Y + (size_t)br * rows;
+        for (int r = 0; r < rows; ++r) y[r] = dot_simd(A + (size_t)r * cols, x, cols);
+    }
+#endif
+}
+
 static inline int snap_batch_size(int batch_size) {
     if (batch_size <= 4) return 4;
     if (batch_size <= 8) return 8;
@@ -416,15 +447,36 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                 }
             }
 
+            vector<float> x_last_flat((size_t)B * D, 0.0f);
+            vector<float> x_seq_flat((size_t)B * T * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) x_last_flat[idx2d(b, d, D)] = x[b][last][d];
+                for (int t = 0; t < T; ++t) {
+                    int row = b * T + t;
+                    for (int d = 0; d < D; ++d) x_seq_flat[idx2d(row, d, D)] = x[b][t][d];
+                }
+            }
+
+            vector<float> q_last_flat((size_t)B * D, 0.0f);
+            vector<float> k_seq_flat((size_t)B * T * D, 0.0f);
+            vector<float> v_seq_flat((size_t)B * T * D, 0.0f);
+            matmul_batch_rm(Wq.data(), x_last_flat.data(), q_last_flat.data(), B, D, D);
+            matmul_batch_rm(Wk.data(), x_seq_flat.data(), k_seq_flat.data(), B * T, D, D);
+            matmul_batch_rm(Wv.data(), x_seq_flat.data(), v_seq_flat.data(), B * T, D, D);
+
             vector<vector<float>> q_last(B, vector<float>(D, 0.0));
             vector<vector<vector<float>>> k_all(B, vector<vector<float>>(T, vector<float>(D, 0.0)));
             vector<vector<vector<float>>> v_all(B, vector<vector<float>>(T, vector<float>(D, 0.0)));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                matvec_rm(Wq.data(), x[b][last].data(), q_last[b].data(), D, D);
+                for (int d = 0; d < D; ++d) q_last[b][d] = q_last_flat[idx2d(b, d, D)];
                 for (int t = 0; t < T; ++t) {
-                    matvec_rm(Wk.data(), x[b][t].data(), k_all[b][t].data(), D, D);
-                    matvec_rm(Wv.data(), x[b][t].data(), v_all[b][t].data(), D, D);
+                    int row = b * T + t;
+                    for (int d = 0; d < D; ++d) {
+                        k_all[b][t][d] = k_seq_flat[idx2d(row, d, D)];
+                        v_all[b][t][d] = v_seq_flat[idx2d(row, d, D)];
+                    }
                 }
             }
 
@@ -440,40 +492,69 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                 for (int t = 0; t < T; ++t) axpy_simd(head[b].data(), v_all[b][t].data(), a[b][t], D);
             }
 
+            vector<float> head_flat((size_t)B * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) head_flat[idx2d(b, d, D)] = head[b][d];
+            }
+
+            vector<float> attn_out_flat((size_t)B * D, 0.0f);
+            matmul_batch_rm(Wo.data(), head_flat.data(), attn_out_flat.data(), B, D, D);
+
             vector<vector<float>> attn_out(B, vector<float>(D, 0.0));
             vector<vector<float>> pre1(B, vector<float>(D, 0.0));
             vector<vector<float>> h1_norm(B, vector<float>(D, 0.0));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                matvec_rm(Wo.data(), head[b].data(), attn_out[b].data(), D, D);
+                for (int i = 0; i < D; ++i) attn_out[b][i] = attn_out_flat[idx2d(b, i, D)];
                 for (int i = 0; i < D; ++i) pre1[b][i] = x[b][last][i] + attn_out[b][i];
                 h1_norm[b] = layer_norm_forward(pre1[b], ln1_gamma, ln1_beta);
             }
 
+            vector<float> h1_norm_flat((size_t)B * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) h1_norm_flat[idx2d(b, d, D)] = h1_norm[b][d];
+            }
+
+            vector<float> ff_pre_flat((size_t)B * FF, 0.0f);
+            matmul_batch_rm(Wff1.data(), h1_norm_flat.data(), ff_pre_flat.data(), B, FF, D);
+
             vector<vector<float>> ff_pre(B, vector<float>(FF, 0.0));
             vector<vector<float>> ff(B, vector<float>(FF, 0.0));
-            vector<vector<float>> ff2(B, vector<float>(D, 0.0));
+            vector<float> ff_flat((size_t)B * FF, 0.0f);
+            vector<float> ff2_flat((size_t)B * D, 0.0f);
             vector<vector<float>> pre2(B, vector<float>(D, 0.0));
             vector<vector<float>> h2_norm(B, vector<float>(D, 0.0));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                matvec_rm(Wff1.data(), h1_norm[b].data(), ff_pre[b].data(), FF, D);
                 for (int i = 0; i < FF; ++i) {
-                    float z = bff1[i] + ff_pre[b][i];
+                    float z = bff1[i] + ff_pre_flat[idx2d(b, i, FF)];
                     ff_pre[b][i] = z;
                     ff[b][i] = z > 0.0 ? z : 0.0;
+                    ff_flat[idx2d(b, i, FF)] = ff[b][i];
                 }
-                matvec_rm(Wff2.data(), ff[b].data(), ff2[b].data(), D, FF);
-                for (int i = 0; i < D; ++i) pre2[b][i] = h1_norm[b][i] + bff2[i] + ff2[b][i];
+            }
+
+            matmul_batch_rm(Wff2.data(), ff_flat.data(), ff2_flat.data(), B, D, FF);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int i = 0; i < D; ++i) pre2[b][i] = h1_norm[b][i] + bff2[i] + ff2_flat[idx2d(b, i, D)];
                 h2_norm[b] = layer_norm_forward(pre2[b], ln2_gamma, ln2_beta);
             }
 
             vector<vector<float>> y(B, vector<float>(vocab, 0.0));
+            vector<float> h2_norm_flat((size_t)B * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) h2_norm_flat[idx2d(b, d, D)] = h2_norm[b][d];
+            }
+            vector<float> logits_flat((size_t)B * vocab, 0.0f);
+            matmul_batch_rm(Wout.data(), h2_norm_flat.data(), logits_flat.data(), B, vocab, D);
             #pragma omp parallel for reduction(+:total_loss) schedule(static)
             for (int b = 0; b < B; ++b) {
                 vector<float> logits(vocab, 0.0);
-                matvec_rm(Wout.data(), h2_norm[b].data(), logits.data(), vocab, D);
-                for (int k = 0; k < vocab; ++k) logits[k] += bout[k];
+                for (int k = 0; k < vocab; ++k) logits[k] = logits_flat[idx2d(b, k, vocab)] + bout[k];
                 y[b] = softmax(logits);
                 total_loss += -log(y[b][batch_target[b]] + 1e-12);
             }
