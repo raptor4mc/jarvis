@@ -640,6 +640,7 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                         dpos_emb_sum[t][d] += dx_all[t][d];
                     }
                 }
+            }
 
             for (int k = 0; k < vocab; ++k) {
                 gbout_accum[k] += gbout_sum[k];
