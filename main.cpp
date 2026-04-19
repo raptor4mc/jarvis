@@ -24,11 +24,14 @@ int main() {
         "feel free to experiment with different prompts and see how the model reacts to your input "
         "remember that this chatbot is only a demonstration and not a full language model but it can still be fun to interact with ";
 
-    ifstream wiki_in("wikipedia.txt");
-    if (wiki_in) {
-        string wiki((istreambuf_iterator<char>(wiki_in)), istreambuf_iterator<char>());
+    const vector<string> training_files = {"wikipedia.txt", "greeting.txt", "general.txt"};
+    for (const string &path : training_files) {
+        ifstream in(path);
+        if (!in) continue;
+
+        string extra((istreambuf_iterator<char>(in)), istreambuf_iterator<char>());
         text += "\n";
-        text += wiki;
+        text += extra;
     }
 
     vector<int> data = tokenize_bytes(text);
