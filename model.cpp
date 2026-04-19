@@ -94,6 +94,41 @@ static inline void matmul_batch_rm(const float *A, const float *X, float *Y, int
 #endif
 }
 
+// Fused QKV projection: for each input row x, computes q = x*Wq^T, k = x*Wk^T, v = x*Wv^T in one pass.
+static inline void matmul_batch_qkv_fused(
+    const float *Wq,
+    const float *Wk,
+    const float *Wv,
+    const float *X,
+    float *Q,
+    float *K,
+    float *V,
+    int batch_rows,
+    int d) {
+    #pragma omp parallel for schedule(static)
+    for (int br = 0; br < batch_rows; ++br) {
+        const float *x = X + (size_t)br * d;
+        float *q = Q + (size_t)br * d;
+        float *k = K + (size_t)br * d;
+        float *v = V + (size_t)br * d;
+        for (int i = 0; i < d; ++i) {
+            const float *wq = Wq + (size_t)i * d;
+            const float *wk = Wk + (size_t)i * d;
+            const float *wv = Wv + (size_t)i * d;
+            float sq = 0.0f, sk = 0.0f, sv = 0.0f;
+            for (int j = 0; j < d; ++j) {
+                float xv = x[j];
+                sq += wq[j] * xv;
+                sk += wk[j] * xv;
+                sv += wv[j] * xv;
+            }
+            q[i] = sq;
+            k[i] = sk;
+            v[i] = sv;
+        }
+    }
+}
+
 static inline int snap_batch_size(int batch_size) {
     if (batch_size <= 4) return 4;
     if (batch_size <= 8) return 8;
@@ -447,30 +482,36 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                 }
             }
 
-            vector<float> x_last_flat((size_t)B * D, 0.0f);
             vector<float> x_seq_flat((size_t)B * T * D, 0.0f);
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                for (int d = 0; d < D; ++d) x_last_flat[idx2d(b, d, D)] = x[b][last][d];
                 for (int t = 0; t < T; ++t) {
                     int row = b * T + t;
                     for (int d = 0; d < D; ++d) x_seq_flat[idx2d(row, d, D)] = x[b][t][d];
                 }
             }
 
-            vector<float> q_last_flat((size_t)B * D, 0.0f);
+            vector<float> q_seq_flat((size_t)B * T * D, 0.0f);
             vector<float> k_seq_flat((size_t)B * T * D, 0.0f);
             vector<float> v_seq_flat((size_t)B * T * D, 0.0f);
-            matmul_batch_rm(Wq.data(), x_last_flat.data(), q_last_flat.data(), B, D, D);
-            matmul_batch_rm(Wk.data(), x_seq_flat.data(), k_seq_flat.data(), B * T, D, D);
-            matmul_batch_rm(Wv.data(), x_seq_flat.data(), v_seq_flat.data(), B * T, D, D);
+            matmul_batch_qkv_fused(
+                Wq.data(),
+                Wk.data(),
+                Wv.data(),
+                x_seq_flat.data(),
+                q_seq_flat.data(),
+                k_seq_flat.data(),
+                v_seq_flat.data(),
+                B * T,
+                D);
 
             vector<vector<float>> q_last(B, vector<float>(D, 0.0));
             vector<vector<vector<float>>> k_all(B, vector<vector<float>>(T, vector<float>(D, 0.0)));
             vector<vector<vector<float>>> v_all(B, vector<vector<float>>(T, vector<float>(D, 0.0)));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                for (int d = 0; d < D; ++d) q_last[b][d] = q_last_flat[idx2d(b, d, D)];
+                int q_row = b * T + last;
+                for (int d = 0; d < D; ++d) q_last[b][d] = q_seq_flat[idx2d(q_row, d, D)];
                 for (int t = 0; t < T; ++t) {
                     int row = b * T + t;
                     for (int d = 0; d < D; ++d) {
