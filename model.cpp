@@ -351,47 +351,8 @@ bool ChatModel::save_weights(const string &filename) const {
 
 void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_size) {
     if ((int)data.size() <= T) return;
-    if (batch_size < 1) batch_size = 1;
 
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 4) batch_size = 4;
-    else if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 4) batch_size = 4;
-    else if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 4) batch_size = 4;
-    else if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
+    // Snap to supported micro-batch sizes to keep memory and throughput predictable.
     batch_size = snap_batch_size(batch_size);
 
     struct Sample { vector<int> ctx; int target; };
@@ -752,8 +713,7 @@ string ChatModel::generate(const vector<int> &context, int length, double temper
 
     vector<int> out_tokens = ctx;
     for (int step = 0; step < length; ++step) {
-        vector<int> norm = normalize_context(ctx);
-        vector<float> h_last = forward_last_hidden(norm);
+        vector<float> h_last = forward_last_hidden(ctx);
 
         vector<float> logits(vocab);
         matvec_rm(Wout.data(), h_last.data(), logits.data(), vocab, D);
