@@ -63,6 +63,72 @@ static inline void matvec_rm(const float *A, const float *x, float *y, int rows,
 #endif
 }
 
+// Computes Y = X * A^T where:
+//   X is [batch_rows x cols] row-major
+//   A is [rows x cols] row-major
+//   Y is [batch_rows x rows] row-major
+static inline void matmul_batch_rm(const float *A, const float *X, float *Y, int batch_rows, int rows, int cols) {
+#if defined(USE_CBLAS)
+    cblas_sgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasTrans,
+        batch_rows,
+        rows,
+        cols,
+        1.0f,
+        X,
+        cols,
+        A,
+        cols,
+        0.0f,
+        Y,
+        rows);
+#else
+    #pragma omp parallel for schedule(static)
+    for (int br = 0; br < batch_rows; ++br) {
+        const float *x = X + (size_t)br * cols;
+        float *y = Y + (size_t)br * rows;
+        for (int r = 0; r < rows; ++r) y[r] = dot_simd(A + (size_t)r * cols, x, cols);
+    }
+#endif
+}
+
+// Fused QKV projection: for each input row x, computes q = x*Wq^T, k = x*Wk^T, v = x*Wv^T in one pass.
+static inline void matmul_batch_qkv_fused(
+    const float *Wq,
+    const float *Wk,
+    const float *Wv,
+    const float *X,
+    float *Q,
+    float *K,
+    float *V,
+    int batch_rows,
+    int d) {
+    #pragma omp parallel for schedule(static)
+    for (int br = 0; br < batch_rows; ++br) {
+        const float *x = X + (size_t)br * d;
+        float *q = Q + (size_t)br * d;
+        float *k = K + (size_t)br * d;
+        float *v = V + (size_t)br * d;
+        for (int i = 0; i < d; ++i) {
+            const float *wq = Wq + (size_t)i * d;
+            const float *wk = Wk + (size_t)i * d;
+            const float *wv = Wv + (size_t)i * d;
+            float sq = 0.0f, sk = 0.0f, sv = 0.0f;
+            for (int j = 0; j < d; ++j) {
+                float xv = x[j];
+                sq += wq[j] * xv;
+                sk += wk[j] * xv;
+                sv += wv[j] * xv;
+            }
+            q[i] = sq;
+            k[i] = sk;
+            v[i] = sv;
+        }
+    }
+}
+
 static inline int snap_batch_size(int batch_size) {
     if (batch_size <= 4) return 4;
     if (batch_size <= 8) return 8;
@@ -373,6 +439,27 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
 
     const float scale = 1.0f / sqrtf((float)D);
     int last = T - 1;
+    const float beta1 = 0.9f;
+    const float beta2 = 0.999f;
+    const float adam_eps = 1e-8f;
+    int adam_step = 0;
+
+    vector<vector<float>> mWout(vocab, vector<float>(D, 0.0f)), vWout(vocab, vector<float>(D, 0.0f));
+    vector<float> mbout(vocab, 0.0f), vbout(vocab, 0.0f);
+    vector<vector<float>> mWo(D, vector<float>(D, 0.0f)), vWo(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWq(D, vector<float>(D, 0.0f)), vWq(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWk(D, vector<float>(D, 0.0f)), vWk(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWv(D, vector<float>(D, 0.0f)), vWv(D, vector<float>(D, 0.0f));
+    vector<vector<float>> mWff1(FF, vector<float>(D, 0.0f)), vWff1(FF, vector<float>(D, 0.0f));
+    vector<float> mbff1(FF, 0.0f), vbff1(FF, 0.0f);
+    vector<vector<float>> mWff2(D, vector<float>(FF, 0.0f)), vWff2(D, vector<float>(FF, 0.0f));
+    vector<float> mbff2(D, 0.0f), vbff2(D, 0.0f);
+    vector<float> mln1_gamma(D, 0.0f), vln1_gamma(D, 0.0f);
+    vector<float> mln1_beta(D, 0.0f), vln1_beta(D, 0.0f);
+    vector<float> mln2_gamma(D, 0.0f), vln2_gamma(D, 0.0f);
+    vector<float> mln2_beta(D, 0.0f), vln2_beta(D, 0.0f);
+    vector<vector<float>> mtoken_emb(vocab, vector<float>(D, 0.0f)), vtoken_emb(vocab, vector<float>(D, 0.0f));
+    vector<vector<float>> mpos_emb(T, vector<float>(D, 0.0f)), vpos_emb(T, vector<float>(D, 0.0f));
 
     for (int ep = 0; ep < epochs; ++ep) {
         float total_loss = 0.0f;
@@ -416,15 +503,42 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                 }
             }
 
+            vector<float> x_seq_flat((size_t)B * T * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int t = 0; t < T; ++t) {
+                    int row = b * T + t;
+                    for (int d = 0; d < D; ++d) x_seq_flat[idx2d(row, d, D)] = x[b][t][d];
+                }
+            }
+
+            vector<float> q_seq_flat((size_t)B * T * D, 0.0f);
+            vector<float> k_seq_flat((size_t)B * T * D, 0.0f);
+            vector<float> v_seq_flat((size_t)B * T * D, 0.0f);
+            matmul_batch_qkv_fused(
+                Wq.data(),
+                Wk.data(),
+                Wv.data(),
+                x_seq_flat.data(),
+                q_seq_flat.data(),
+                k_seq_flat.data(),
+                v_seq_flat.data(),
+                B * T,
+                D);
+
             vector<vector<float>> q_last(B, vector<float>(D, 0.0));
             vector<vector<vector<float>>> k_all(B, vector<vector<float>>(T, vector<float>(D, 0.0)));
             vector<vector<vector<float>>> v_all(B, vector<vector<float>>(T, vector<float>(D, 0.0)));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                matvec_rm(Wq.data(), x[b][last].data(), q_last[b].data(), D, D);
+                int q_row = b * T + last;
+                for (int d = 0; d < D; ++d) q_last[b][d] = q_seq_flat[idx2d(q_row, d, D)];
                 for (int t = 0; t < T; ++t) {
-                    matvec_rm(Wk.data(), x[b][t].data(), k_all[b][t].data(), D, D);
-                    matvec_rm(Wv.data(), x[b][t].data(), v_all[b][t].data(), D, D);
+                    int row = b * T + t;
+                    for (int d = 0; d < D; ++d) {
+                        k_all[b][t][d] = k_seq_flat[idx2d(row, d, D)];
+                        v_all[b][t][d] = v_seq_flat[idx2d(row, d, D)];
+                    }
                 }
             }
 
@@ -440,40 +554,69 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                 for (int t = 0; t < T; ++t) axpy_simd(head[b].data(), v_all[b][t].data(), a[b][t], D);
             }
 
+            vector<float> head_flat((size_t)B * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) head_flat[idx2d(b, d, D)] = head[b][d];
+            }
+
+            vector<float> attn_out_flat((size_t)B * D, 0.0f);
+            matmul_batch_rm(Wo.data(), head_flat.data(), attn_out_flat.data(), B, D, D);
+
             vector<vector<float>> attn_out(B, vector<float>(D, 0.0));
             vector<vector<float>> pre1(B, vector<float>(D, 0.0));
             vector<vector<float>> h1_norm(B, vector<float>(D, 0.0));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                matvec_rm(Wo.data(), head[b].data(), attn_out[b].data(), D, D);
+                for (int i = 0; i < D; ++i) attn_out[b][i] = attn_out_flat[idx2d(b, i, D)];
                 for (int i = 0; i < D; ++i) pre1[b][i] = x[b][last][i] + attn_out[b][i];
                 h1_norm[b] = layer_norm_forward(pre1[b], ln1_gamma, ln1_beta);
             }
 
+            vector<float> h1_norm_flat((size_t)B * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) h1_norm_flat[idx2d(b, d, D)] = h1_norm[b][d];
+            }
+
+            vector<float> ff_pre_flat((size_t)B * FF, 0.0f);
+            matmul_batch_rm(Wff1.data(), h1_norm_flat.data(), ff_pre_flat.data(), B, FF, D);
+
             vector<vector<float>> ff_pre(B, vector<float>(FF, 0.0));
             vector<vector<float>> ff(B, vector<float>(FF, 0.0));
-            vector<vector<float>> ff2(B, vector<float>(D, 0.0));
+            vector<float> ff_flat((size_t)B * FF, 0.0f);
+            vector<float> ff2_flat((size_t)B * D, 0.0f);
             vector<vector<float>> pre2(B, vector<float>(D, 0.0));
             vector<vector<float>> h2_norm(B, vector<float>(D, 0.0));
             #pragma omp parallel for schedule(static)
             for (int b = 0; b < B; ++b) {
-                matvec_rm(Wff1.data(), h1_norm[b].data(), ff_pre[b].data(), FF, D);
                 for (int i = 0; i < FF; ++i) {
-                    float z = bff1[i] + ff_pre[b][i];
+                    float z = bff1[i] + ff_pre_flat[idx2d(b, i, FF)];
                     ff_pre[b][i] = z;
                     ff[b][i] = z > 0.0 ? z : 0.0;
+                    ff_flat[idx2d(b, i, FF)] = ff[b][i];
                 }
-                matvec_rm(Wff2.data(), ff[b].data(), ff2[b].data(), D, FF);
-                for (int i = 0; i < D; ++i) pre2[b][i] = h1_norm[b][i] + bff2[i] + ff2[b][i];
+            }
+
+            matmul_batch_rm(Wff2.data(), ff_flat.data(), ff2_flat.data(), B, D, FF);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int i = 0; i < D; ++i) pre2[b][i] = h1_norm[b][i] + bff2[i] + ff2_flat[idx2d(b, i, D)];
                 h2_norm[b] = layer_norm_forward(pre2[b], ln2_gamma, ln2_beta);
             }
 
             vector<vector<float>> y(B, vector<float>(vocab, 0.0));
+            vector<float> h2_norm_flat((size_t)B * D, 0.0f);
+            #pragma omp parallel for schedule(static)
+            for (int b = 0; b < B; ++b) {
+                for (int d = 0; d < D; ++d) h2_norm_flat[idx2d(b, d, D)] = h2_norm[b][d];
+            }
+            vector<float> logits_flat((size_t)B * vocab, 0.0f);
+            matmul_batch_rm(Wout.data(), h2_norm_flat.data(), logits_flat.data(), B, vocab, D);
             #pragma omp parallel for reduction(+:total_loss) schedule(static)
             for (int b = 0; b < B; ++b) {
                 vector<float> logits(vocab, 0.0);
-                matvec_rm(Wout.data(), h2_norm[b].data(), logits.data(), vocab, D);
-                for (int k = 0; k < vocab; ++k) logits[k] += bout[k];
+                for (int k = 0; k < vocab; ++k) logits[k] = logits_flat[idx2d(b, k, vocab)] + bout[k];
                 y[b] = softmax(logits);
                 total_loss += -log(y[b][batch_target[b]] + 1e-12);
             }
@@ -637,40 +780,78 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
             bool should_step = (accum_steps >= grad_accum_steps) || (batch_end == sample_starts.size());
             if (!should_step) continue;
 
-            float step_lr = lr / (float)accum_samples;
+            adam_step += 1;
+            float inv_samples = 1.0f / (float)accum_samples;
+            float bias_correction1 = 1.0f - powf(beta1, (float)adam_step);
+            float bias_correction2 = 1.0f - powf(beta2, (float)adam_step);
+
+            auto adam_update = [&](float &param, float grad, float &m, float &v) {
+                m = beta1 * m + (1.0f - beta1) * grad;
+                v = beta2 * v + (1.0f - beta2) * grad * grad;
+                float m_hat = m / bias_correction1;
+                float v_hat = v / bias_correction2;
+                param -= lr * (m_hat / (sqrtf(v_hat) + adam_eps));
+            };
+
             #pragma omp parallel for schedule(static)
             for (int k = 0; k < vocab; ++k) {
-                for (int j = 0; j < D; ++j) Wout[idx2d(k, j, D)] -= step_lr * gWout_accum[k][j];
-                bout[k] -= step_lr * gbout_accum[k];
+                for (int j = 0; j < D; ++j) {
+                    float g = gWout_accum[k][j] * inv_samples;
+                    adam_update(Wout[idx2d(k, j, D)], g, mWout[k][j], vWout[k][j]);
+                }
+                float gb = gbout_accum[k] * inv_samples;
+                adam_update(bout[k], gb, mbout[k], vbout[k]);
             }
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < D; ++i) {
                 for (int j = 0; j < D; ++j) {
-                    Wo[idx2d(i, j, D)] -= step_lr * gWo_accum[i][j];
-                    Wq[idx2d(i, j, D)] -= step_lr * gWq_accum[i][j];
-                    Wk[idx2d(i, j, D)] -= step_lr * gWk_accum[i][j];
-                    Wv[idx2d(i, j, D)] -= step_lr * gWv_accum[i][j];
+                    float gwo = gWo_accum[i][j] * inv_samples;
+                    float gwq = gWq_accum[i][j] * inv_samples;
+                    float gwk = gWk_accum[i][j] * inv_samples;
+                    float gwv = gWv_accum[i][j] * inv_samples;
+                    adam_update(Wo[idx2d(i, j, D)], gwo, mWo[i][j], vWo[i][j]);
+                    adam_update(Wq[idx2d(i, j, D)], gwq, mWq[i][j], vWq[i][j]);
+                    adam_update(Wk[idx2d(i, j, D)], gwk, mWk[i][j], vWk[i][j]);
+                    adam_update(Wv[idx2d(i, j, D)], gwv, mWv[i][j], vWv[i][j]);
                 }
-                for (int j = 0; j < FF; ++j) Wff2[idx2d(i, j, FF)] -= step_lr * gWff2_accum[i][j];
-                bff2[i] -= step_lr * gbff2_accum[i];
+                for (int j = 0; j < FF; ++j) {
+                    float gwff2 = gWff2_accum[i][j] * inv_samples;
+                    adam_update(Wff2[idx2d(i, j, FF)], gwff2, mWff2[i][j], vWff2[i][j]);
+                }
+                float gb2 = gbff2_accum[i] * inv_samples;
+                adam_update(bff2[i], gb2, mbff2[i], vbff2[i]);
 
-                ln1_gamma[i] -= step_lr * gln1_gamma_accum[i];
-                ln1_beta[i] -= step_lr * gln1_beta_accum[i];
-                ln2_gamma[i] -= step_lr * gln2_gamma_accum[i];
-                ln2_beta[i] -= step_lr * gln2_beta_accum[i];
+                float gln1g = gln1_gamma_accum[i] * inv_samples;
+                float gln1b = gln1_beta_accum[i] * inv_samples;
+                float gln2g = gln2_gamma_accum[i] * inv_samples;
+                float gln2b = gln2_beta_accum[i] * inv_samples;
+                adam_update(ln1_gamma[i], gln1g, mln1_gamma[i], vln1_gamma[i]);
+                adam_update(ln1_beta[i], gln1b, mln1_beta[i], vln1_beta[i]);
+                adam_update(ln2_gamma[i], gln2g, mln2_gamma[i], vln2_gamma[i]);
+                adam_update(ln2_beta[i], gln2b, mln2_beta[i], vln2_beta[i]);
             }
             #pragma omp parallel for schedule(static)
             for (int i = 0; i < FF; ++i) {
-                for (int j = 0; j < D; ++j) Wff1[idx2d(i, j, D)] -= step_lr * gWff1_accum[i][j];
-                bff1[i] -= step_lr * gbff1_accum[i];
+                for (int j = 0; j < D; ++j) {
+                    float gwff1 = gWff1_accum[i][j] * inv_samples;
+                    adam_update(Wff1[idx2d(i, j, D)], gwff1, mWff1[i][j], vWff1[i][j]);
+                }
+                float gb1 = gbff1_accum[i] * inv_samples;
+                adam_update(bff1[i], gb1, mbff1[i], vbff1[i]);
             }
             #pragma omp parallel for schedule(static)
             for (int tok = 0; tok < vocab; ++tok) {
-                for (int d = 0; d < D; ++d) token_emb[idx2d(tok, d, D)] -= step_lr * dtoken_emb_accum[tok][d];
+                for (int d = 0; d < D; ++d) {
+                    float gte = dtoken_emb_accum[tok][d] * inv_samples;
+                    adam_update(token_emb[idx2d(tok, d, D)], gte, mtoken_emb[tok][d], vtoken_emb[tok][d]);
+                }
             }
             #pragma omp parallel for schedule(static)
             for (int t = 0; t < T; ++t) {
-                for (int d = 0; d < D; ++d) pos_emb[idx2d(t, d, D)] -= step_lr * dpos_emb_accum[t][d];
+                for (int d = 0; d < D; ++d) {
+                    float gpe = dpos_emb_accum[t][d] * inv_samples;
+                    adam_update(pos_emb[idx2d(t, d, D)], gpe, mpos_emb[t][d], vpos_emb[t][d]);
+                }
             }
 
             for (int k = 0; k < vocab; ++k) {
