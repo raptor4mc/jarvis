@@ -380,6 +380,11 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
     else if (batch_size <= 16) batch_size = 16;
     else batch_size = 32;
 
+    if (batch_size <= 4) batch_size = 4;
+    else if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
     struct Sample { vector<int> ctx; int target; };
     vector<Sample> samples;
     samples.reserve(data.size());
@@ -715,8 +720,13 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                 gbff1_accum[i] = 0.0f;
                 fill(gWff1_accum[i].begin(), gWff1_accum[i].end(), 0.0f);
             }
-            for (int tok = 0; tok < vocab; ++tok) fill(dtoken_emb_accum[tok].begin(), dtoken_emb_accum[tok].end(), 0.0f);
-            for (int t = 0; t < T; ++t) fill(dpos_emb_accum[t].begin(), dpos_emb_accum[t].end(), 0.0f);
+            for (int tok = 0; tok < vocab; ++tok) {
+                fill(dtoken_emb_accum[tok].begin(), dtoken_emb_accum[tok].end(), 0.0f);
+            }
+            #pragma omp parallel for schedule(static)
+            for (int t = 0; t < T; ++t) {
+                fill(dpos_emb_accum[t].begin(), dpos_emb_accum[t].end(), 0.0f);
+            }
             accum_samples = 0;
             accum_steps = 0;
         }
