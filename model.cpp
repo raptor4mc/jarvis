@@ -344,6 +344,36 @@ bool ChatModel::save_weights(const string &filename) const {
 
 void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_size) {
     if ((int)data.size() <= T) return;
+    if (batch_size < 1) batch_size = 1;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
+
+    if (batch_size <= 4) batch_size = 4;
+    else if (batch_size <= 8) batch_size = 8;
+    else if (batch_size <= 16) batch_size = 16;
+    else batch_size = 32;
 
     if (batch_size <= 4) batch_size = 4;
     else if (batch_size <= 8) batch_size = 8;
@@ -596,7 +626,6 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
                         dpos_emb_sum[t][d] += dx_all[t][d];
                     }
                 }
-            }
 
             for (int k = 0; k < vocab; ++k) {
                 gbout_accum[k] += gbout_sum[k];
