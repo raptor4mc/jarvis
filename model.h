@@ -13,7 +13,7 @@ public:
     bool load_weights(const std::string &filename);
     bool save_weights(const std::string &filename) const;
 
-    void train(const std::vector<int> &data, int epochs, float lr, int batch_size = 1);
+    void train(const std::vector<int> &data, int epochs, float lr, int batch_size = 1, int sample_stride = 1);
     std::string generate(const std::vector<int> &context, int length, double temperature, bool deterministic) const;
 
 private:
