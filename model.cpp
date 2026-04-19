@@ -352,46 +352,6 @@ bool ChatModel::save_weights(const string &filename) const {
 void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_size) {
     if ((int)data.size() <= T) return;
     if (batch_size < 1) batch_size = 1;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 4) batch_size = 4;
-    else if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 4) batch_size = 4;
-    else if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
-    if (batch_size <= 4) batch_size = 4;
-    else if (batch_size <= 8) batch_size = 8;
-    else if (batch_size <= 16) batch_size = 16;
-    else batch_size = 32;
-
     batch_size = snap_batch_size(batch_size);
 
     struct Sample { vector<int> ctx; int target; };

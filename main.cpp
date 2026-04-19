@@ -46,9 +46,9 @@ int main() {
     const int num_layers = 2;
     const int seq_len = 32;
     const float learning_rate = 0.05f;
-    const int epochs_if_loaded = 10;
-    const int epochs_if_fresh = 50;
-    const int batch_size = 16;
+    const int epochs_if_loaded = 2;
+    const int epochs_if_fresh = 15;
+    const int batch_size = 32;
     const string weights_file = "weights.bin";
 
     cout << "Vocab size: " << vocab
