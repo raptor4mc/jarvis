@@ -49,6 +49,19 @@ int main() {
     const int epochs_if_loaded = 2;
     const int epochs_if_fresh = 15;
     const int batch_size = 32;
+    int sample_stride = 1;
+    if (const char *env_stride = getenv("JARVIS_SAMPLE_STRIDE")) {
+        int parsed = atoi(env_stride);
+        if (parsed > 0) sample_stride = parsed;
+    }
+    int max_tokens = 0;
+    if (const char *env_max_tokens = getenv("JARVIS_MAX_TOKENS")) {
+        int parsed = atoi(env_max_tokens);
+        if (parsed > 0) max_tokens = parsed;
+    }
+    if (max_tokens > 0 && (int)data.size() > max_tokens) {
+        data.assign(data.end() - max_tokens, data.end());
+    }
     const string weights_file = "weights.bin";
 
     cout << "Vocab size: " << vocab
@@ -56,7 +69,9 @@ int main() {
          << ", model_dim: " << model_dim
          << ", num_heads: " << num_heads
          << ", num_layers: " << num_layers
-         << ", ff_dim: " << (model_dim * 4) << endl;
+         << ", ff_dim: " << (model_dim * 4)
+         << ", sample_stride: " << sample_stride
+         << ", max_tokens: " << (max_tokens > 0 ? max_tokens : (int)data.size()) << endl;
 
     ChatModel model(vocab, model_dim, seq_len);
 
@@ -70,7 +85,7 @@ int main() {
              << epochs_to_train << " epochs from scratch...\n";
     }
 
-    model.train(data, epochs_to_train, learning_rate, batch_size);
+    model.train(data, epochs_to_train, learning_rate, batch_size, sample_stride);
 
     if (model.save_weights(weights_file)) {
         cout << "Saved weights to " << weights_file << ".\n";

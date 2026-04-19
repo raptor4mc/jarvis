@@ -349,24 +349,24 @@ bool ChatModel::save_weights(const string &filename) const {
     return (bool)out;
 }
 
-void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_size) {
+void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_size, int sample_stride) {
     if ((int)data.size() <= T) return;
     if (batch_size < 1) batch_size = 1;
+    if (sample_stride < 1) sample_stride = 1;
     batch_size = snap_batch_size(batch_size);
 
-    struct Sample { vector<int> ctx; int target; };
-    vector<Sample> samples;
-    samples.reserve(data.size());
-    for (size_t i = 0; i + T < data.size(); ++i) {
-        vector<int> ctx(data.begin() + i, data.begin() + i + T);
-        samples.push_back({ctx, data[i + T]});
-    }
+    vector<int> sample_starts;
+    sample_starts.reserve(data.size());
+    for (size_t i = 0; i + T < data.size(); i += (size_t)sample_stride) sample_starts.push_back((int)i);
+    const int sample_count = (int)sample_starts.size();
+    if (sample_count == 0) return;
 
     int grad_accum_steps = 1;
     if (batch_size == 4) grad_accum_steps = 4;      // effective batch 16
     else if (batch_size == 8) grad_accum_steps = 2; // effective batch 16
 
-    cout << "Samples: " << samples.size()
+    cout << "Samples: " << sample_count
+         << ", stride: " << sample_stride
          << ", micro-batch size: " << batch_size
          << ", grad_accum_steps: " << grad_accum_steps
          << ", effective batch: " << (batch_size * grad_accum_steps) << endl;
@@ -394,15 +394,16 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
         int accum_samples = 0;
         int accum_steps = 0;
 
-        for (size_t batch_start = 0; batch_start < samples.size(); batch_start += (size_t)batch_size) {
-            size_t batch_end = min(samples.size(), batch_start + (size_t)batch_size);
+        for (size_t batch_start = 0; batch_start < sample_starts.size(); batch_start += (size_t)batch_size) {
+            size_t batch_end = min(sample_starts.size(), batch_start + (size_t)batch_size);
             int B = (int)(batch_end - batch_start);
 
             vector<vector<int>> batch_ctx(B, vector<int>(T));
             vector<int> batch_target(B);
             for (int b = 0; b < B; ++b) {
-                batch_ctx[b] = samples[batch_start + b].ctx;
-                batch_target[b] = samples[batch_start + b].target;
+                int start = sample_starts[batch_start + b];
+                for (int t = 0; t < T; ++t) batch_ctx[b][t] = data[start + t];
+                batch_target[b] = data[start + T];
             }
 
             // Batch forward pass.
@@ -633,7 +634,7 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
 
             accum_samples += B;
             accum_steps += 1;
-            bool should_step = (accum_steps >= grad_accum_steps) || (batch_end == samples.size());
+            bool should_step = (accum_steps >= grad_accum_steps) || (batch_end == sample_starts.size());
             if (!should_step) continue;
 
             float step_lr = lr / (float)accum_samples;
@@ -701,7 +702,7 @@ void ChatModel::train(const vector<int> &data, int epochs, float lr, int batch_s
             accum_steps = 0;
         }
 
-        float avg_loss = total_loss / (float)samples.size();
+        float avg_loss = total_loss / (float)sample_count;
         cout << "Epoch " << (ep + 1) << "/" << epochs << " avg loss: " << avg_loss << endl;
     }
 }
