@@ -17,6 +17,7 @@
 //   RINGTAIL_LEARN_RATE      override learning rate (default: 0.001)
 //   RINGTAIL_RETRIEVE_TOP_K  files retrieved per prompt (default: 4)
 //   RINGTAIL_RETRIEVE_CHARS  max chars per retrieved file snippet (default: 1200)
+//   RINGTAIL_SCAFFOLD_TOKENS generation tokens for /draft and /scaffold (default: 900)
 
 mod model;
 mod tokenizer;
@@ -25,7 +26,7 @@ use model::ChatModel;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Clone)]
 struct CorpusDoc {
@@ -202,12 +203,10 @@ fn build_prompt_with_retrieval(
         .iter()
         .enumerate()
         .filter_map(|(i, doc)| {
+            let path_lc = doc.path.to_lowercase();
             let score = terms
                 .iter()
-                .map(|t| {
-                    doc.content_lc.matches(t).count()
-                        + doc.path.to_lowercase().matches(t).count() * 2
-                })
+                .map(|t| doc.content_lc.matches(t).count() + path_lc.matches(t).count() * 2)
                 .sum::<usize>();
             if score > 0 {
                 Some((i, score))
@@ -243,6 +242,117 @@ fn build_prompt_with_retrieval(
     prompt
 }
 
+fn build_scaffold_prompt(task: &str, docs: &[CorpusDoc], top_k: usize, max_chars: usize) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are ferris, a rust project generator. Output ONLY this format:\n[[DIR:path]]\n[[FILE:path]]\n<rust code or text>\n[[END_FILE]]\nUse sensible module/file names and compile-oriented Rust project layout.\n",
+    );
+    prompt.push_str("Task:\n");
+    prompt.push_str(task);
+    prompt.push_str("\n");
+    prompt.push_str(&build_prompt_with_retrieval(task, docs, top_k, max_chars));
+    prompt
+}
+
+fn sanitize_rel_path(raw: &str) -> Option<PathBuf> {
+    let candidate = Path::new(raw.trim());
+    if candidate.as_os_str().is_empty() || candidate.is_absolute() {
+        return None;
+    }
+
+    let mut out = PathBuf::new();
+    for c in candidate.components() {
+        match c {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn parse_scaffold_output(spec: &str) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+
+    let mut current_file: Option<PathBuf> = None;
+    let mut current_content = String::new();
+
+    for line in spec.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("[[DIR:") && trimmed.ends_with("]]") {
+            if let Some(path) = sanitize_rel_path(&trimmed[6..trimmed.len() - 2]) {
+                dirs.push(path);
+            }
+            continue;
+        }
+
+        if trimmed.starts_with("[[FILE:") && trimmed.ends_with("]]") {
+            if let Some(path) = current_file.take() {
+                files.push((path, current_content.trim().to_string()));
+                current_content.clear();
+            }
+            current_file = sanitize_rel_path(&trimmed[7..trimmed.len() - 2]);
+            continue;
+        }
+
+        if trimmed == "[[END_FILE]]" {
+            if let Some(path) = current_file.take() {
+                files.push((path, current_content.trim().to_string()));
+                current_content.clear();
+            }
+            continue;
+        }
+
+        if current_file.is_some() {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    if let Some(path) = current_file.take() {
+        files.push((path, current_content.trim().to_string()));
+    }
+
+    (dirs, files)
+}
+
+fn apply_scaffold(spec: &str, out_root: &Path) -> io::Result<(usize, usize)> {
+    let (dirs, files) = parse_scaffold_output(spec);
+
+    fs::create_dir_all(out_root)?;
+
+    let mut created_dirs = 0usize;
+    for dir in dirs {
+        let full = out_root.join(dir);
+        fs::create_dir_all(&full)?;
+        created_dirs += 1;
+    }
+
+    let mut created_files = 0usize;
+    for (rel_path, content) in files {
+        let full = out_root.join(&rel_path);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&full, content)?;
+        created_files += 1;
+    }
+    prompt.push_str("</retrieved_context>\n");
+    prompt.push_str("<user_prompt>\n");
+    prompt.push_str(user_input);
+    prompt.push_str("\n</user_prompt>");
+    prompt
+}
+
+    Ok((created_dirs, created_files))
+}
+
 fn main() {
     // ── data loading ────────────────────────────────────────────────────────
     let roots_env =
@@ -265,6 +375,7 @@ fn main() {
     let learn_rate = parse_f32_env("RINGTAIL_LEARN_RATE", 0.001f32, 1e-6);
     let retrieve_top_k = parse_usize_env("RINGTAIL_RETRIEVE_TOP_K", 4, 1);
     let retrieve_chars = parse_usize_env("RINGTAIL_RETRIEVE_CHARS", 1200, 64);
+    let scaffold_tokens = parse_usize_env("RINGTAIL_SCAFFOLD_TOKENS", 900, 64);
 
     let mut epochs_if_loaded = 1usize;
     let mut epochs_if_fresh = 6usize;
@@ -309,7 +420,7 @@ fn main() {
 
     println!("Loaded .txt files: {}, roots: {:?}", docs.len(), data_roots);
     println!(
-        "Vocab: {}, tokens: {}, model_dim: {}, seq_len: {}, ff_dim: {}, stride: {}, lr: {}, retrieve_top_k: {}, retrieve_chars: {}",
+        "Vocab: {}, tokens: {}, model_dim: {}, seq_len: {}, ff_dim: {}, stride: {}, lr: {}, retrieve_top_k: {}, retrieve_chars: {}, scaffold_tokens: {}",
         vocab,
         data.len(),
         model_dim,
@@ -319,6 +430,7 @@ fn main() {
         learn_rate,
         retrieve_top_k,
         retrieve_chars,
+        scaffold_tokens,
     );
 
     // ── model init + optional weight load ───────────────────────────────────
@@ -353,9 +465,11 @@ fn main() {
     println!("\nChatbot ready. 🦝");
     println!("Type a message and press Enter.");
     println!("Commands:");
-    println!("  /temp <value>   set temperature (e.g. /temp 0.7)");
-    println!("  /det on|off     toggle deterministic mode");
-    println!("  quit            exit\n");
+    println!("  /temp <value>      set temperature (e.g. /temp 0.7)");
+    println!("  /det on|off        toggle deterministic mode");
+    println!("  /draft <task>      generate project layout + files (text only)");
+    println!("  /scaffold <task>   generate and write files to generated/");
+    println!("  quit               exit\n");
 
     let stdin = io::stdin();
     let mut temperature = 1.0f64;
@@ -402,6 +516,38 @@ fn main() {
         if line == "/det off" {
             deterministic = false;
             println!("Bot: deterministic mode OFF");
+            continue;
+        }
+
+        if let Some(task) = line.strip_prefix("/draft ") {
+            let prompt = build_scaffold_prompt(task.trim(), &docs, retrieve_top_k, retrieve_chars);
+            let mut ctx = tokenizer::tokenize_bytes(&prompt);
+            if ctx.is_empty() {
+                ctx.push(0);
+            }
+            let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
+            println!("Bot draft:\n{}", draft);
+            continue;
+        }
+
+        if let Some(task) = line.strip_prefix("/scaffold ") {
+            let prompt = build_scaffold_prompt(task.trim(), &docs, retrieve_top_k, retrieve_chars);
+            let mut ctx = tokenizer::tokenize_bytes(&prompt);
+            if ctx.is_empty() {
+                ctx.push(0);
+            }
+            let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
+            match apply_scaffold(&draft, Path::new("generated")) {
+                Ok((d, f)) => {
+                    println!(
+                        "Bot: wrote scaffold to ./generated (dirs: {}, files: {})",
+                        d, f
+                    );
+                }
+                Err(e) => {
+                    println!("Bot: failed to write scaffold: {}", e);
+                }
+            }
             continue;
         }
 
