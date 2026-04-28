@@ -153,6 +153,7 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
             docs.push(doc);
         }
     }
+    files.sort();
 
     append_structure_tokens(&mut text, &docs);
 
@@ -342,6 +343,12 @@ fn apply_scaffold(spec: &str, out_root: &Path) -> io::Result<(usize, usize)> {
         fs::write(&full, content)?;
         created_files += 1;
     }
+    prompt.push_str("</retrieved_context>\n");
+    prompt.push_str("<user_prompt>\n");
+    prompt.push_str(user_input);
+    prompt.push_str("\n</user_prompt>");
+    prompt
+}
 
     Ok((created_dirs, created_files))
 }
