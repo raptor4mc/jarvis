@@ -1,0 +1,16 @@
+[package]
+name = "ringtail_ai"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ringtail_ai"
+path = "src/main.rs"
+
+[dependencies]
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
