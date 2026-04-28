@@ -10,20 +10,29 @@
 //   RINGTAIL_MAX_TOKENS    cap training tokens
 //
 // Extra corpus/model knobs:
-//   RINGTAIL_DATA_ROOTS    comma-separated roots to scan (default: "knowledge,.")
-//   RINGTAIL_MAX_FILES     cap number of loaded .txt files (default: 25000)
-//   RINGTAIL_MODEL_DIM     override model dimension (default: 256)
-//   RINGTAIL_SEQ_LEN       override context length (default: 128)
-//   RINGTAIL_LEARN_RATE    override learning rate (default: 0.001)
+//   RINGTAIL_DATA_ROOTS      comma-separated roots to scan (default: "knowledge,.")
+//   RINGTAIL_MAX_FILES       cap number of loaded .txt files (default: 25000)
+//   RINGTAIL_MODEL_DIM       override model dimension (default: 256)
+//   RINGTAIL_SEQ_LEN         override context length (default: 128)
+//   RINGTAIL_LEARN_RATE      override learning rate (default: 0.001)
+//   RINGTAIL_RETRIEVE_TOP_K  files retrieved per prompt (default: 4)
+//   RINGTAIL_RETRIEVE_CHARS  max chars per retrieved file snippet (default: 1200)
 
 mod model;
 mod tokenizer;
 
 use model::ChatModel;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+
+#[derive(Clone)]
+struct CorpusDoc {
+    path: String,
+    content: String,
+    content_lc: String,
+}
 
 fn collect_txt_files(root: &Path, out: &mut Vec<PathBuf>) {
     if !root.exists() {
@@ -49,7 +58,54 @@ fn collect_txt_files(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn load_training_text(data_roots: &[PathBuf], max_files: usize) -> (String, usize) {
+fn normalize_project_path(path: &Path) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    path.strip_prefix(cwd).unwrap_or(path).display().to_string()
+}
+
+fn append_structure_tokens(text: &mut String, docs: &[CorpusDoc]) {
+    let mut dirs: HashSet<String> = HashSet::new();
+    let mut dir_files: HashMap<String, Vec<String>> = HashMap::new();
+
+    for doc in docs {
+        let p = Path::new(&doc.path);
+        if let Some(parent) = p.parent() {
+            let dir = parent.display().to_string();
+            dirs.insert(dir.clone());
+            dir_files.entry(dir).or_default().push(
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+            );
+        }
+    }
+
+    let mut sorted_dirs: Vec<String> = dirs.into_iter().collect();
+    sorted_dirs.sort();
+
+    text.push_str("\n\n<project_structure>\n");
+    for dir in sorted_dirs {
+        text.push_str("<dir>");
+        text.push_str(&dir);
+        text.push_str("</dir>\n");
+
+        if let Some(files) = dir_files.get_mut(&dir) {
+            files.sort();
+            files.dedup();
+            for file in files.iter() {
+                text.push_str("<file_in_dir dir=\"");
+                text.push_str(&dir);
+                text.push_str("\">");
+                text.push_str(file);
+                text.push_str("</file_in_dir>\n");
+            }
+        }
+    }
+    text.push_str("</project_structure>\n");
+}
+
+fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusDoc>) {
     let mut text = String::from(
         "hello there i am an offline chatbot created to demonstrate how a small neural network can learn patterns from text \
          i do not use the internet and i do not rely on external data everything i know is written inside this program \
@@ -68,9 +124,10 @@ fn load_training_text(data_roots: &[PathBuf], max_files: usize) -> (String, usiz
     }
     files.sort();
 
-    let mut loaded = 0usize;
+    let mut docs = Vec::new();
+
     for path in files {
-        if loaded >= max_files {
+        if docs.len() >= max_files {
             break;
         }
 
@@ -80,21 +137,26 @@ fn load_training_text(data_roots: &[PathBuf], max_files: usize) -> (String, usiz
         }
 
         if let Ok(contents) = fs::read_to_string(&canonical) {
-            let tag = canonical
-                .strip_prefix(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-                .unwrap_or(&canonical)
-                .display()
-                .to_string();
+            let tag = normalize_project_path(&canonical);
+            let doc = CorpusDoc {
+                path: tag.clone(),
+                content_lc: contents.to_lowercase(),
+                content: contents,
+            };
 
             text.push_str("\n\n<file:");
             text.push_str(&tag);
             text.push_str(">\n");
-            text.push_str(&contents);
-            loaded += 1;
+            text.push_str(&doc.content);
+
+            docs.push(doc);
         }
     }
+    files.sort();
 
-    (text, loaded)
+    append_structure_tokens(&mut text, &docs);
+
+    (text, docs)
 }
 
 fn parse_usize_env(name: &str, default: usize, min: usize) -> usize {
@@ -113,6 +175,74 @@ fn parse_f32_env(name: &str, default: f32, min: f32) -> f32 {
         .unwrap_or(default)
 }
 
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != ':')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| s.len() >= 3)
+        .collect()
+}
+
+fn build_prompt_with_retrieval(
+    user_input: &str,
+    docs: &[CorpusDoc],
+    top_k: usize,
+    max_chars: usize,
+) -> String {
+    if docs.is_empty() || user_input.trim().is_empty() {
+        return user_input.to_string();
+    }
+
+    let terms = query_terms(user_input);
+    if terms.is_empty() {
+        return user_input.to_string();
+    }
+
+    let mut scored: Vec<(usize, usize)> = docs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, doc)| {
+            let score = terms
+                .iter()
+                .map(|t| {
+                    doc.content_lc.matches(t).count()
+                        + doc.path.to_lowercase().matches(t).count() * 2
+                })
+                .sum::<usize>();
+            if score > 0 {
+                Some((i, score))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if scored.is_empty() {
+        return user_input.to_string();
+    }
+
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut prompt = String::new();
+    prompt.push_str("<retrieved_context>\n");
+    for (idx, score) in scored.into_iter().take(top_k.max(1)) {
+        let doc = &docs[idx];
+        let snippet: String = doc.content.chars().take(max_chars.max(64)).collect();
+        prompt.push_str("<context_file path=\"");
+        prompt.push_str(&doc.path);
+        prompt.push_str("\" score=\"");
+        prompt.push_str(&score.to_string());
+        prompt.push_str("\">\n");
+        prompt.push_str(&snippet);
+        prompt.push_str("\n</context_file>\n");
+    }
+    prompt.push_str("</retrieved_context>\n");
+    prompt.push_str("<user_prompt>\n");
+    prompt.push_str(user_input);
+    prompt.push_str("\n</user_prompt>");
+    prompt
+}
+
 fn main() {
     // ── data loading ────────────────────────────────────────────────────────
     let roots_env =
@@ -125,7 +255,7 @@ fn main() {
         .collect();
 
     let max_files = parse_usize_env("RINGTAIL_MAX_FILES", 25_000, 1);
-    let (text, loaded_files) = load_training_text(&data_roots, max_files);
+    let (text, docs) = load_corpus(&data_roots, max_files);
     let mut data = tokenizer::tokenize_bytes(&text);
 
     // ── hyperparameters ──────────────────────────────────────────────────────
@@ -133,6 +263,8 @@ fn main() {
     let model_dim = parse_usize_env("RINGTAIL_MODEL_DIM", 256, 32);
     let seq_len = parse_usize_env("RINGTAIL_SEQ_LEN", 128, 8);
     let learn_rate = parse_f32_env("RINGTAIL_LEARN_RATE", 0.001f32, 1e-6);
+    let retrieve_top_k = parse_usize_env("RINGTAIL_RETRIEVE_TOP_K", 4, 1);
+    let retrieve_chars = parse_usize_env("RINGTAIL_RETRIEVE_CHARS", 1200, 64);
 
     let mut epochs_if_loaded = 1usize;
     let mut epochs_if_fresh = 6usize;
@@ -175,19 +307,18 @@ fn main() {
         return;
     }
 
+    println!("Loaded .txt files: {}, roots: {:?}", docs.len(), data_roots);
     println!(
-        "Loaded .txt files: {}, roots: {:?}",
-        loaded_files, data_roots
-    );
-    println!(
-        "Vocab: {}, tokens: {}, model_dim: {}, seq_len: {}, ff_dim: {}, stride: {}, lr: {}",
+        "Vocab: {}, tokens: {}, model_dim: {}, seq_len: {}, ff_dim: {}, stride: {}, lr: {}, retrieve_top_k: {}, retrieve_chars: {}",
         vocab,
         data.len(),
         model_dim,
         seq_len,
         model_dim * 4,
         sample_stride,
-        learn_rate
+        learn_rate,
+        retrieve_top_k,
+        retrieve_chars,
     );
 
     // ── model init + optional weight load ───────────────────────────────────
@@ -274,8 +405,9 @@ fn main() {
             continue;
         }
 
-        // Generate reply
-        let mut ctx = tokenizer::tokenize_bytes(&line);
+        // Generate reply with retrieval context from .txt corpus on every prompt.
+        let prompt = build_prompt_with_retrieval(&line, &docs, retrieve_top_k, retrieve_chars);
+        let mut ctx = tokenizer::tokenize_bytes(&prompt);
         if ctx.is_empty() {
             ctx.push(0);
         }
