@@ -294,7 +294,10 @@ fn parse_scaffold_output(spec: &str) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
 
         if trimmed.starts_with("[[FILE:") && trimmed.ends_with("]]") {
             if let Some(path) = current_file.take() {
-                files.push((path, current_content.trim().to_string()));
+                let content = current_content.trim().to_string();
+                if !content.is_empty() {
+                    files.push((path, content));
+                }
                 current_content.clear();
             }
             current_file = sanitize_rel_path(&trimmed[7..trimmed.len() - 2]);
@@ -303,7 +306,10 @@ fn parse_scaffold_output(spec: &str) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
 
         if trimmed == "[[END_FILE]]" {
             if let Some(path) = current_file.take() {
-                files.push((path, current_content.trim().to_string()));
+                let content = current_content.trim().to_string();
+                if !content.is_empty() {
+                    files.push((path, content));
+                }
                 current_content.clear();
             }
             continue;
@@ -316,13 +322,16 @@ fn parse_scaffold_output(spec: &str) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
     }
 
     if let Some(path) = current_file.take() {
-        files.push((path, current_content.trim().to_string()));
+        let content = current_content.trim().to_string();
+        if !content.is_empty() {
+            files.push((path, content));
+        }
     }
 
     (dirs, files)
 }
 
-fn apply_scaffold(spec: &str, out_root: &Path) -> io::Result<(usize, usize)> {
+fn apply_scaffold(spec: &str, out_root: &Path) -> io::Result<(usize, usize, usize)> {
     let (dirs, files) = parse_scaffold_output(spec);
 
     fs::create_dir_all(out_root)?;
@@ -335,22 +344,25 @@ fn apply_scaffold(spec: &str, out_root: &Path) -> io::Result<(usize, usize)> {
     }
 
     let mut created_files = 0usize;
+    let mut skipped_files = 0usize;
     for (rel_path, content) in files {
+        if rel_path.extension().is_none() {
+            skipped_files += 1;
+            continue;
+        }
         let full = out_root.join(&rel_path);
+        if full.exists() && full.is_dir() {
+            skipped_files += 1;
+            continue;
+        }
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(&full, content)?;
         created_files += 1;
     }
-    prompt.push_str("</retrieved_context>\n");
-    prompt.push_str("<user_prompt>\n");
-    prompt.push_str(user_input);
-    prompt.push_str("\n</user_prompt>");
-    prompt
-}
 
-    Ok((created_dirs, created_files))
+    Ok((created_dirs, created_files, skipped_files))
 }
 
 fn main() {
@@ -538,10 +550,10 @@ fn main() {
             }
             let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
             match apply_scaffold(&draft, Path::new("generated")) {
-                Ok((d, f)) => {
+                Ok((d, f, skipped)) => {
                     println!(
-                        "Bot: wrote scaffold to ./generated (dirs: {}, files: {})",
-                        d, f
+                        "Bot: wrote scaffold to ./generated (dirs: {}, files: {}, skipped: {})",
+                        d, f, skipped
                     );
                 }
                 Err(e) => {
