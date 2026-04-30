@@ -153,6 +153,7 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
             docs.push(doc);
         }
     }
+    files.sort();
 
     append_structure_tokens(&mut text, &docs);
 
