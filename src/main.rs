@@ -492,22 +492,32 @@ fn main() {
         println!("Warning: failed to save weights.");
     }
 
-    // Secondary model trained only on project/file-structure patterns
-    let structure_text = build_structure_corpus(&docs);
-    let mut structure_data = tokenizer::tokenize_bytes(&structure_text);
-    if structure_data.len() > seq_len + 1 {
-        let weights_file_structure = "weightsfstrct.bin";
-        let mut structure_model = ChatModel::new(vocab, model_dim, seq_len);
-        let structure_loaded = structure_model.load_weights(weights_file_structure);
-        let structure_epochs = if structure_loaded { 1usize } else { epochs };
-        structure_model.train(&structure_data, structure_epochs, learn_rate, batch_size, sample_stride);
-        if structure_model.save_weights(weights_file_structure) {
-            println!("Saved structure-only weights to {}.", weights_file_structure);
+    // Structure-only weights are opt-in and disabled by default.
+    // For now we keep this model completely out of normal training/inference.
+    let enable_structure_model = std::env::var("RINGTAIL_ENABLE_STRUCTURE_MODEL")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    if enable_structure_model {
+        let structure_text = build_structure_corpus(&docs);
+        let structure_data = tokenizer::tokenize_bytes(&structure_text);
+        if structure_data.len() > seq_len + 1 {
+            let weights_file_structure = "weightsfstrct.bin";
+            let mut structure_model = ChatModel::new(vocab, model_dim, seq_len);
+            let structure_loaded = structure_model.load_weights(weights_file_structure);
+            let structure_epochs = if structure_loaded { 1usize } else { epochs };
+            structure_model.train(&structure_data, structure_epochs, learn_rate, batch_size, sample_stride);
+            if structure_model.save_weights(weights_file_structure) {
+                println!("Saved structure-only weights to {}.", weights_file_structure);
+            } else {
+                println!("Warning: failed to save structure-only weights.");
+            }
         } else {
-            println!("Warning: failed to save structure-only weights.");
+            println!("Skipped structure-only training (not enough tokens).");
         }
     } else {
-        println!("Skipped structure-only training (not enough tokens).");
+        println!("Structure-only model disabled (RINGTAIL_ENABLE_STRUCTURE_MODEL not set).");
     }
 
     // ── chat loop ────────────────────────────────────────────────────────────
