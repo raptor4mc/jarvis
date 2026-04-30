@@ -153,11 +153,23 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
             docs.push(doc);
         }
     }
-    files.sort();
 
     append_structure_tokens(&mut text, &docs);
 
     (text, docs)
+}
+
+
+
+fn build_structure_corpus(docs: &[CorpusDoc]) -> String {
+    let mut text = String::from("<file_structure_training>\n");
+    for doc in docs {
+        text.push_str("<path>");
+        text.push_str(&doc.path);
+        text.push_str("</path>\n");
+    }
+    text.push_str("</file_structure_training>\n");
+    text
 }
 
 fn parse_usize_env(name: &str, default: usize, min: usize) -> usize {
@@ -381,7 +393,7 @@ fn main() {
     let mut data = tokenizer::tokenize_bytes(&text);
 
     // ── hyperparameters ──────────────────────────────────────────────────────
-    let vocab = 256;
+    let vocab = tokenizer::vocab_size();
     let model_dim = parse_usize_env("RINGTAIL_MODEL_DIM", 256, 32);
     let seq_len = parse_usize_env("RINGTAIL_SEQ_LEN", 128, 8);
     let learn_rate = parse_f32_env("RINGTAIL_LEARN_RATE", 0.001f32, 1e-6);
@@ -471,6 +483,24 @@ fn main() {
         println!("Saved weights to {}.", weights_file);
     } else {
         println!("Warning: failed to save weights.");
+    }
+
+    // Secondary model trained only on project/file-structure patterns
+    let structure_text = build_structure_corpus(&docs);
+    let mut structure_data = tokenizer::tokenize_bytes(&structure_text);
+    if structure_data.len() > seq_len + 1 {
+        let weights_file_structure = "weightsfstrct.bin";
+        let mut structure_model = ChatModel::new(vocab, model_dim, seq_len);
+        let structure_loaded = structure_model.load_weights(weights_file_structure);
+        let structure_epochs = if structure_loaded { 1usize } else { epochs };
+        structure_model.train(&structure_data, structure_epochs, learn_rate, batch_size, sample_stride);
+        if structure_model.save_weights(weights_file_structure) {
+            println!("Saved structure-only weights to {}.", weights_file_structure);
+        } else {
+            println!("Warning: failed to save structure-only weights.");
+        }
+    } else {
+        println!("Skipped structure-only training (not enough tokens).");
     }
 
     // ── chat loop ────────────────────────────────────────────────────────────
