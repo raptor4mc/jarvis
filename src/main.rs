@@ -401,10 +401,10 @@ fn main() {
     let retrieve_chars = parse_usize_env("RINGTAIL_RETRIEVE_CHARS", 1200, 64);
     let scaffold_tokens = parse_usize_env("RINGTAIL_SCAFFOLD_TOKENS", 900, 64);
 
-    let mut epochs_if_loaded = 1usize;
-    let mut epochs_if_fresh = 6usize;
+    let mut epochs_if_loaded = 3usize;
+    let mut epochs_if_fresh = 24usize;
     let mut batch_size = 32usize;
-    let mut sample_stride = 2usize;
+    let mut sample_stride = 1usize;
 
     // Environment variable overrides
     if let Ok(v) = std::env::var("RINGTAIL_SAMPLE_STRIDE") {
@@ -435,6 +435,13 @@ fn main() {
                 data = data[data.len() - n..].to_vec();
             }
         }
+    }
+    // Auto-scale epochs for larger runs unless explicitly overridden.
+    if std::env::var("RINGTAIL_EPOCHS").is_err() {
+        let token_scale = (data.len() / 100_000).max(1);
+        let adaptive = (token_scale * 8).clamp(8, 80);
+        epochs_if_fresh = epochs_if_fresh.max(adaptive);
+        epochs_if_loaded = epochs_if_loaded.max((adaptive / 4).max(2));
     }
 
     if data.len() < 16 {
