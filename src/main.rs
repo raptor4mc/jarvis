@@ -153,11 +153,23 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
             docs.push(doc);
         }
     }
-    files.sort();
 
     append_structure_tokens(&mut text, &docs);
 
     (text, docs)
+}
+
+
+
+fn build_structure_corpus(docs: &[CorpusDoc]) -> String {
+    let mut text = String::from("<file_structure_training>\n");
+    for doc in docs {
+        text.push_str("<path>");
+        text.push_str(&doc.path);
+        text.push_str("</path>\n");
+    }
+    text.push_str("</file_structure_training>\n");
+    text
 }
 
 fn parse_usize_env(name: &str, default: usize, min: usize) -> usize {
@@ -381,7 +393,7 @@ fn main() {
     let mut data = tokenizer::tokenize_bytes(&text);
 
     // ── hyperparameters ──────────────────────────────────────────────────────
-    let vocab = 256;
+    let vocab = tokenizer::vocab_size();
     let model_dim = parse_usize_env("RINGTAIL_MODEL_DIM", 256, 32);
     let seq_len = parse_usize_env("RINGTAIL_SEQ_LEN", 128, 8);
     let learn_rate = parse_f32_env("RINGTAIL_LEARN_RATE", 0.001f32, 1e-6);
@@ -389,10 +401,10 @@ fn main() {
     let retrieve_chars = parse_usize_env("RINGTAIL_RETRIEVE_CHARS", 1200, 64);
     let scaffold_tokens = parse_usize_env("RINGTAIL_SCAFFOLD_TOKENS", 900, 64);
 
-    let mut epochs_if_loaded = 1usize;
-    let mut epochs_if_fresh = 6usize;
+    let mut epochs_if_loaded = 3usize;
+    let mut epochs_if_fresh = 24usize;
     let mut batch_size = 32usize;
-    let mut sample_stride = 2usize;
+    let mut sample_stride = 1usize;
 
     // Environment variable overrides
     if let Ok(v) = std::env::var("RINGTAIL_SAMPLE_STRIDE") {
@@ -423,6 +435,13 @@ fn main() {
                 data = data[data.len() - n..].to_vec();
             }
         }
+    }
+    // Auto-scale epochs for larger runs unless explicitly overridden.
+    if std::env::var("RINGTAIL_EPOCHS").is_err() {
+        let token_scale = (data.len() / 100_000).max(1);
+        let adaptive = (token_scale * 8).clamp(8, 80);
+        epochs_if_fresh = epochs_if_fresh.max(adaptive);
+        epochs_if_loaded = epochs_if_loaded.max((adaptive / 4).max(2));
     }
 
     if data.len() < 16 {
@@ -471,6 +490,34 @@ fn main() {
         println!("Saved weights to {}.", weights_file);
     } else {
         println!("Warning: failed to save weights.");
+    }
+
+    // Structure-only weights are opt-in and disabled by default.
+    // For now we keep this model completely out of normal training/inference.
+    let enable_structure_model = std::env::var("RINGTAIL_ENABLE_STRUCTURE_MODEL")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    if enable_structure_model {
+        let structure_text = build_structure_corpus(&docs);
+        let structure_data = tokenizer::tokenize_bytes(&structure_text);
+        if structure_data.len() > seq_len + 1 {
+            let weights_file_structure = "weightsfstrct.bin";
+            let mut structure_model = ChatModel::new(vocab, model_dim, seq_len);
+            let structure_loaded = structure_model.load_weights(weights_file_structure);
+            let structure_epochs = if structure_loaded { 1usize } else { epochs };
+            structure_model.train(&structure_data, structure_epochs, learn_rate, batch_size, sample_stride);
+            if structure_model.save_weights(weights_file_structure) {
+                println!("Saved structure-only weights to {}.", weights_file_structure);
+            } else {
+                println!("Warning: failed to save structure-only weights.");
+            }
+        } else {
+            println!("Skipped structure-only training (not enough tokens).");
+        }
+    } else {
+        println!("Structure-only model disabled (RINGTAIL_ENABLE_STRUCTURE_MODEL not set).");
     }
 
     // ── chat loop ────────────────────────────────────────────────────────────
