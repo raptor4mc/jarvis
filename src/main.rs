@@ -23,11 +23,14 @@ mod model;
 mod tokenizer;
 
 use model::ChatModel;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 #[derive(Clone)]
 struct ExtractedZip {
@@ -94,6 +97,28 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
         let extract_dir = base.join(format!("zip_{}", idx));
         let _ = fs::create_dir_all(&extract_dir);
 
+        let stamp_file = extract_dir.join(".jarvis_zip_stamp");
+        let zip_mtime = fs::metadata(&canonical)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let stamp_mtime = fs::metadata(&stamp_file)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let needs_extract = !extract_dir.exists() || zip_mtime > stamp_mtime;
+
+        if !needs_extract {
+            println!(
+                "Zip unchanged, reusing extracted dir {}",
+                extract_dir.display()
+            );
+            data_roots.push(extract_dir.clone());
+            extracted.push(ExtractedZip {
+                zip_path: canonical,
+                extract_dir,
+            });
+            continue;
+        }
+
         let status = Command::new("unzip")
             .arg("-o")
             .arg(&canonical)
@@ -103,6 +128,9 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
 
         match status {
             Ok(s) if s.success() => {
+                if needs_extract {
+                    let _ = fs::write(&stamp_file, b"ok");
+                }
                 println!(
                     "Unzipped {} -> {}",
                     canonical.display(),
@@ -132,6 +160,16 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
 
 fn rezip_sources(extracted: &[ExtractedZip]) {
     for entry in extracted {
+        let stamp_file = entry.extract_dir.join(".jarvis_zip_stamp");
+        let extract_mtime = fs::metadata(&entry.extract_dir)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let zip_mtime = fs::metadata(&entry.zip_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if zip_mtime >= extract_mtime {
+            continue;
+        }
         let status = Command::new("zip")
             .arg("-qr")
             .arg(&entry.zip_path)
@@ -140,11 +178,14 @@ fn rezip_sources(extracted: &[ExtractedZip]) {
             .status();
 
         match status {
-            Ok(s) if s.success() => println!(
-                "Rezipped {} from {}",
-                entry.zip_path.display(),
-                entry.extract_dir.display()
-            ),
+            Ok(s) if s.success() => {
+                let _ = fs::write(&stamp_file, b"ok");
+                println!(
+                    "Rezipped {} from {}",
+                    entry.zip_path.display(),
+                    entry.extract_dir.display()
+                )
+            }
             Ok(_) => println!("Warning: failed to rezip {}", entry.zip_path.display()),
             Err(e) => println!(
                 "Warning: zip command error for {}: {}",
@@ -295,6 +336,23 @@ fn build_structure_corpus(docs: &[CorpusDoc]) -> String {
     }
     text.push_str("</file_structure_training>\n");
     text
+}
+
+fn corpus_fingerprint(docs: &[CorpusDoc]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for doc in docs {
+        doc.path.hash(&mut hasher);
+        doc.content.len().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn read_corpus_fingerprint(path: &Path) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
+}
+
+fn write_corpus_fingerprint(path: &Path, fp: u64) {
+    let _ = fs::write(path, fp.to_string());
 }
 
 fn parse_usize_env(name: &str, default: usize, min: usize) -> usize {
@@ -596,7 +654,22 @@ fn main() {
     let mut model = ChatModel::new(vocab, model_dim, seq_len);
 
     let loaded = model.load_weights(weights_file);
-    let epochs = if loaded {
+    let weights_meta = PathBuf::from("weights.meta");
+    let current_fingerprint = corpus_fingerprint(&docs);
+    let last_fingerprint = read_corpus_fingerprint(&weights_meta);
+    let corpus_changed = last_fingerprint != Some(current_fingerprint);
+    let force_train = std::env::var("RINGTAIL_FORCE_TRAIN")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    let epochs = if loaded && !corpus_changed && !force_train {
+        println!(
+            "Weights loaded and corpus unchanged (fingerprint {}). Skipping retraining for faster startup.",
+            current_fingerprint
+        );
+        0
+    } else if loaded {
         println!(
             "Loaded weights from {}. Continuing training for {} epoch(s).",
             weights_file, epochs_if_loaded
@@ -611,12 +684,17 @@ fn main() {
     };
 
     // ── train ────────────────────────────────────────────────────────────────
-    model.train(&data, epochs, learn_rate, batch_size, sample_stride);
+    if epochs > 0 {
+        model.train(&data, epochs, learn_rate, batch_size, sample_stride);
+    } else {
+        println!("Skipping training (0 epochs requested).");
+    }
 
     rezip_sources(&extracted_zip_sources);
 
     if model.save_weights(weights_file) {
         println!("Saved weights to {}.", weights_file);
+        write_corpus_fingerprint(&weights_meta, current_fingerprint);
     } else {
         println!("Warning: failed to save weights.");
     }
@@ -669,7 +747,7 @@ fn main() {
     println!("  quit               exit\n");
 
     let stdin = io::stdin();
-    let mut temperature = 1.0f64;
+    let mut temperature = 0.85f64;
     let mut deterministic = false;
 
     loop {
@@ -755,7 +833,8 @@ fn main() {
             ctx.push(0);
         }
 
-        let reply = model.generate(&ctx, 15, temperature, deterministic);
+        let dynamic_tokens = ((line.len() / 8).clamp(18, 64)) as usize;
+        let reply = model.generate(&ctx, dynamic_tokens, temperature, deterministic);
         println!("Bot: {}", reply);
     }
 }
