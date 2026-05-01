@@ -27,6 +27,133 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+
+#[derive(Clone)]
+struct ExtractedZip {
+    zip_path: PathBuf,
+    extract_dir: PathBuf,
+}
+
+fn should_skip_zip_walk_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| name == ".jarvis_unzipped" || name == "target" || name == ".git")
+        .unwrap_or(false)
+}
+
+fn collect_zip_files(root: &Path, out: &mut Vec<PathBuf>) {
+    if !root.exists() {
+        return;
+    }
+
+    if root.is_file() {
+        if root.extension().and_then(|e| e.to_str()) == Some("zip") {
+            out.push(root.to_path_buf());
+        }
+        return;
+    }
+
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if should_skip_zip_walk_dir(&path) {
+                    continue;
+                }
+                collect_zip_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("zip") {
+                out.push(path);
+            }
+        }
+    }
+}
+
+fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
+    let mut zip_files = Vec::new();
+    for root in data_roots.iter() {
+        collect_zip_files(root, &mut zip_files);
+    }
+    let mut unique_canonical = HashSet::new();
+    zip_files = zip_files
+        .into_iter()
+        .filter(|p| unique_canonical.insert(p.canonicalize().unwrap_or(p.clone())))
+        .collect();
+    zip_files.sort();
+
+    if zip_files.is_empty() {
+        return Vec::new();
+    }
+
+    let base = PathBuf::from(".jarvis_unzipped");
+    let _ = fs::create_dir_all(&base);
+
+    let mut extracted = Vec::new();
+    for (idx, zip_path) in zip_files.into_iter().enumerate() {
+        let canonical = zip_path.canonicalize().unwrap_or(zip_path.clone());
+        let extract_dir = base.join(format!("zip_{}", idx));
+        let _ = fs::create_dir_all(&extract_dir);
+
+        let status = Command::new("unzip")
+            .arg("-o")
+            .arg(&canonical)
+            .arg("-d")
+            .arg(&extract_dir)
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                println!(
+                    "Unzipped {} -> {}",
+                    canonical.display(),
+                    extract_dir.display()
+                );
+                data_roots.push(extract_dir.clone());
+                extracted.push(ExtractedZip {
+                    zip_path: canonical,
+                    extract_dir,
+                });
+            }
+            Ok(_) => {
+                println!("Warning: failed to unzip {}", canonical.display());
+            }
+            Err(e) => {
+                println!(
+                    "Warning: unzip command error for {}: {}",
+                    canonical.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    extracted
+}
+
+fn rezip_sources(extracted: &[ExtractedZip]) {
+    for entry in extracted {
+        let status = Command::new("zip")
+            .arg("-qr")
+            .arg(&entry.zip_path)
+            .arg(".")
+            .current_dir(&entry.extract_dir)
+            .status();
+
+        match status {
+            Ok(s) if s.success() => println!(
+                "Rezipped {} from {}",
+                entry.zip_path.display(),
+                entry.extract_dir.display()
+            ),
+            Ok(_) => println!("Warning: failed to rezip {}", entry.zip_path.display()),
+            Err(e) => println!(
+                "Warning: zip command error for {}: {}",
+                entry.zip_path.display(),
+                e
+            ),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct CorpusDoc {
@@ -158,8 +285,6 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
 
     (text, docs)
 }
-
-
 
 fn build_structure_corpus(docs: &[CorpusDoc]) -> String {
     let mut text = String::from("<file_structure_training>\n");
@@ -381,12 +506,14 @@ fn main() {
     // ── data loading ────────────────────────────────────────────────────────
     let roots_env =
         std::env::var("RINGTAIL_DATA_ROOTS").unwrap_or_else(|_| "knowledge,.".to_string());
-    let data_roots: Vec<PathBuf> = roots_env
+    let mut data_roots: Vec<PathBuf> = roots_env
         .split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .collect();
+
+    let extracted_zip_sources = prepare_zip_sources(&mut data_roots);
 
     let max_files = parse_usize_env("RINGTAIL_MAX_FILES", 25_000, 1);
     let (text, docs) = load_corpus(&data_roots, max_files);
@@ -486,6 +613,8 @@ fn main() {
     // ── train ────────────────────────────────────────────────────────────────
     model.train(&data, epochs, learn_rate, batch_size, sample_stride);
 
+    rezip_sources(&extracted_zip_sources);
+
     if model.save_weights(weights_file) {
         println!("Saved weights to {}.", weights_file);
     } else {
@@ -507,9 +636,18 @@ fn main() {
             let mut structure_model = ChatModel::new(vocab, model_dim, seq_len);
             let structure_loaded = structure_model.load_weights(weights_file_structure);
             let structure_epochs = if structure_loaded { 1usize } else { epochs };
-            structure_model.train(&structure_data, structure_epochs, learn_rate, batch_size, sample_stride);
+            structure_model.train(
+                &structure_data,
+                structure_epochs,
+                learn_rate,
+                batch_size,
+                sample_stride,
+            );
             if structure_model.save_weights(weights_file_structure) {
-                println!("Saved structure-only weights to {}.", weights_file_structure);
+                println!(
+                    "Saved structure-only weights to {}.",
+                    weights_file_structure
+                );
             } else {
                 println!("Warning: failed to save structure-only weights.");
             }
