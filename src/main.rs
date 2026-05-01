@@ -35,6 +35,13 @@ struct ExtractedZip {
     extract_dir: PathBuf,
 }
 
+fn should_skip_zip_walk_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| name == ".jarvis_unzipped" || name == "target" || name == ".git")
+        .unwrap_or(false)
+}
+
 fn collect_zip_files(root: &Path, out: &mut Vec<PathBuf>) {
     if !root.exists() {
         return;
@@ -51,6 +58,9 @@ fn collect_zip_files(root: &Path, out: &mut Vec<PathBuf>) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                if should_skip_zip_walk_dir(&path) {
+                    continue;
+                }
                 collect_zip_files(&path, out);
             } else if path.extension().and_then(|e| e.to_str()) == Some("zip") {
                 out.push(path);
@@ -64,8 +74,12 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
     for root in data_roots.iter() {
         collect_zip_files(root, &mut zip_files);
     }
+    let mut unique_canonical = HashSet::new();
+    zip_files = zip_files
+        .into_iter()
+        .filter(|p| unique_canonical.insert(p.canonicalize().unwrap_or(p.clone())))
+        .collect();
     zip_files.sort();
-    zip_files.dedup();
 
     if zip_files.is_empty() {
         return Vec::new();
