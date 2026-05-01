@@ -28,6 +28,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 #[derive(Clone)]
 struct ExtractedZip {
@@ -94,6 +95,28 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
         let extract_dir = base.join(format!("zip_{}", idx));
         let _ = fs::create_dir_all(&extract_dir);
 
+        let stamp_file = extract_dir.join(".jarvis_zip_stamp");
+        let zip_mtime = fs::metadata(&canonical)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let stamp_mtime = fs::metadata(&stamp_file)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let needs_extract = !extract_dir.exists() || zip_mtime > stamp_mtime;
+
+        if !needs_extract {
+            println!(
+                "Zip unchanged, reusing extracted dir {}",
+                extract_dir.display()
+            );
+            data_roots.push(extract_dir.clone());
+            extracted.push(ExtractedZip {
+                zip_path: canonical,
+                extract_dir,
+            });
+            continue;
+        }
+
         let status = Command::new("unzip")
             .arg("-o")
             .arg(&canonical)
@@ -103,6 +126,9 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
 
         match status {
             Ok(s) if s.success() => {
+                if needs_extract {
+                    let _ = fs::write(&stamp_file, b"ok");
+                }
                 println!(
                     "Unzipped {} -> {}",
                     canonical.display(),
@@ -132,6 +158,16 @@ fn prepare_zip_sources(data_roots: &mut Vec<PathBuf>) -> Vec<ExtractedZip> {
 
 fn rezip_sources(extracted: &[ExtractedZip]) {
     for entry in extracted {
+        let stamp_file = entry.extract_dir.join(".jarvis_zip_stamp");
+        let extract_mtime = fs::metadata(&entry.extract_dir)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let zip_mtime = fs::metadata(&entry.zip_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        if zip_mtime >= extract_mtime {
+            continue;
+        }
         let status = Command::new("zip")
             .arg("-qr")
             .arg(&entry.zip_path)
@@ -140,11 +176,14 @@ fn rezip_sources(extracted: &[ExtractedZip]) {
             .status();
 
         match status {
-            Ok(s) if s.success() => println!(
-                "Rezipped {} from {}",
-                entry.zip_path.display(),
-                entry.extract_dir.display()
-            ),
+            Ok(s) if s.success() => {
+                let _ = fs::write(&stamp_file, b"ok");
+                println!(
+                    "Rezipped {} from {}",
+                    entry.zip_path.display(),
+                    entry.extract_dir.display()
+                )
+            }
             Ok(_) => println!("Warning: failed to rezip {}", entry.zip_path.display()),
             Err(e) => println!(
                 "Warning: zip command error for {}: {}",
@@ -611,7 +650,11 @@ fn main() {
     };
 
     // ── train ────────────────────────────────────────────────────────────────
-    model.train(&data, epochs, learn_rate, batch_size, sample_stride);
+    if epochs > 0 {
+        model.train(&data, epochs, learn_rate, batch_size, sample_stride);
+    } else {
+        println!("Skipping training (0 epochs requested).");
+    }
 
     rezip_sources(&extracted_zip_sources);
 
@@ -669,7 +712,7 @@ fn main() {
     println!("  quit               exit\n");
 
     let stdin = io::stdin();
-    let mut temperature = 1.0f64;
+    let mut temperature = 0.85f64;
     let mut deterministic = false;
 
     loop {
@@ -755,7 +798,8 @@ fn main() {
             ctx.push(0);
         }
 
-        let reply = model.generate(&ctx, 15, temperature, deterministic);
+        let dynamic_tokens = ((line.len() / 8).clamp(18, 64)) as usize;
+        let reply = model.generate(&ctx, dynamic_tokens, temperature, deterministic);
         println!("Bot: {}", reply);
     }
 }
