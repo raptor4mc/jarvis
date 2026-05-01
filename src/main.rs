@@ -23,7 +23,9 @@ mod model;
 mod tokenizer;
 
 use model::ChatModel;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
@@ -336,6 +338,23 @@ fn build_structure_corpus(docs: &[CorpusDoc]) -> String {
     text
 }
 
+fn corpus_fingerprint(docs: &[CorpusDoc]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for doc in docs {
+        doc.path.hash(&mut hasher);
+        doc.content.len().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn read_corpus_fingerprint(path: &Path) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse::<u64>().ok()
+}
+
+fn write_corpus_fingerprint(path: &Path, fp: u64) {
+    let _ = fs::write(path, fp.to_string());
+}
+
 fn parse_usize_env(name: &str, default: usize, min: usize) -> usize {
     std::env::var(name)
         .ok()
@@ -635,7 +654,22 @@ fn main() {
     let mut model = ChatModel::new(vocab, model_dim, seq_len);
 
     let loaded = model.load_weights(weights_file);
-    let epochs = if loaded {
+    let weights_meta = PathBuf::from("weights.meta");
+    let current_fingerprint = corpus_fingerprint(&docs);
+    let last_fingerprint = read_corpus_fingerprint(&weights_meta);
+    let corpus_changed = last_fingerprint != Some(current_fingerprint);
+    let force_train = std::env::var("RINGTAIL_FORCE_TRAIN")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+
+    let epochs = if loaded && !corpus_changed && !force_train {
+        println!(
+            "Weights loaded and corpus unchanged (fingerprint {}). Skipping retraining for faster startup.",
+            current_fingerprint
+        );
+        0
+    } else if loaded {
         println!(
             "Loaded weights from {}. Continuing training for {} epoch(s).",
             weights_file, epochs_if_loaded
@@ -660,6 +694,7 @@ fn main() {
 
     if model.save_weights(weights_file) {
         println!("Saved weights to {}.", weights_file);
+        write_corpus_fingerprint(&weights_meta, current_fingerprint);
     } else {
         println!("Warning: failed to save weights.");
     }
