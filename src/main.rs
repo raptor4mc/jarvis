@@ -12,8 +12,8 @@
 // Extra corpus/model knobs:
 //   RINGTAIL_DATA_ROOTS      comma-separated roots to scan (default: "knowledge,.")
 //   RINGTAIL_MAX_FILES       cap number of loaded .txt files (default: 25000)
-//   RINGTAIL_MODEL_DIM       override model dimension (default: 256)
-//   RINGTAIL_SEQ_LEN         override context length (default: 128)
+//   RINGTAIL_MODEL_DIM       override model dimension (default: 600)
+//   RINGTAIL_SEQ_LEN         override context length (default: 1600)
 //   RINGTAIL_LEARN_RATE      override learning rate (default: 0.001)
 //   RINGTAIL_RETRIEVE_TOP_K  files retrieved per prompt (default: 4)
 //   RINGTAIL_RETRIEVE_CHARS  max chars per retrieved file snippet (default: 1200)
@@ -579,8 +579,8 @@ fn main() {
 
     // ── hyperparameters ──────────────────────────────────────────────────────
     let vocab = tokenizer::vocab_size();
-    let model_dim = parse_usize_env("RINGTAIL_MODEL_DIM", 256, 32);
-    let seq_len = parse_usize_env("RINGTAIL_SEQ_LEN", 128, 8);
+    let model_dim = parse_usize_env("RINGTAIL_MODEL_DIM", 600, 32);
+    let seq_len = parse_usize_env("RINGTAIL_SEQ_LEN", 1600, 8);
     let learn_rate = parse_f32_env("RINGTAIL_LEARN_RATE", 0.001f32, 1e-6);
     let retrieve_top_k = parse_usize_env("RINGTAIL_RETRIEVE_TOP_K", 4, 1);
     let retrieve_chars = parse_usize_env("RINGTAIL_RETRIEVE_CHARS", 1200, 64);
