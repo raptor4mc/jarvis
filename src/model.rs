@@ -106,27 +106,31 @@ fn snap_batch_size(b: usize) -> usize {
     if b <= 4 { 4 } else if b <= 8 { 8 } else if b <= 16 { 16 } else { 32 }
 }
 
-// ── Adam state helper ────────────────────────────────────────────────────────
+// ── Muon optimizer state helper ───────────────────────────────────────────────
 
-struct AdamState {
+struct MuonState {
     m: Vec<f32>,
     v: Vec<f32>,
 }
 
-impl AdamState {
+impl MuonState {
     fn new(n: usize) -> Self {
         Self { m: vec![0.0; n], v: vec![0.0; n] }
     }
 
-    fn update(&mut self, params: &mut [f32], grads: &[f32], lr: f32, step: i32, beta1: f32, beta2: f32, eps: f32) {
-        let bc1 = 1.0 - beta1.powi(step);
-        let bc2 = 1.0 - beta2.powi(step);
+    fn update(&mut self, params: &mut [f32], grads: &[f32], lr: f32, step: i32, momentum: f32, eps: f32) {
+        let bias_correction = 1.0 - momentum.powi(step);
         for i in 0..params.len() {
-            self.m[i] = beta1 * self.m[i] + (1.0 - beta1) * grads[i];
-            self.v[i] = beta2 * self.v[i] + (1.0 - beta2) * grads[i] * grads[i];
-            let m_hat = self.m[i] / bc1;
-            let v_hat = self.v[i] / bc2;
-            params[i] -= lr * m_hat / (v_hat.sqrt() + eps);
+            self.m[i] = momentum * self.m[i] + (1.0 - momentum) * grads[i];
+            self.v[i] = 0.99 * self.v[i] + 0.01 * grads[i] * grads[i];
+            let m_hat = self.m[i] / bias_correction.max(eps);
+            let rms = self.v[i].sqrt() + eps;
+            let mut upd = m_hat / rms;
+            let mag = upd.abs();
+            if mag > 1.0 {
+                upd /= mag;
+            }
+            params[i] -= lr * upd;
         }
     }
 }
@@ -382,28 +386,27 @@ impl ChatModel {
 
         let scale = 1.0f32 / (d as f32).sqrt();
         let last = t - 1;
-        let beta1 = 0.9f32;
-        let beta2 = 0.999f32;
-        let adam_eps = 1e-8f32;
+        let muon_momentum = 0.95f32;
+        let muon_eps = 1e-8f32;
         let mut adam_step = 0i32;
 
         // Adam states — one per parameter tensor (flattened)
-        let mut am_token_emb = AdamState::new(vocab * d);
-        let mut am_pos_emb   = AdamState::new(t * d);
-        let mut am_wq  = AdamState::new(d * d);
-        let mut am_wk  = AdamState::new(d * d);
-        let mut am_wv  = AdamState::new(d * d);
-        let mut am_wo  = AdamState::new(d * d);
-        let mut am_wff1 = AdamState::new(ff * d);
-        let mut am_bff1 = AdamState::new(ff);
-        let mut am_wff2 = AdamState::new(d * ff);
-        let mut am_bff2 = AdamState::new(d);
-        let mut am_ln1g = AdamState::new(d);
-        let mut am_ln1b = AdamState::new(d);
-        let mut am_ln2g = AdamState::new(d);
-        let mut am_ln2b = AdamState::new(d);
-        let mut am_wout = AdamState::new(vocab * d);
-        let mut am_bout = AdamState::new(vocab);
+        let mut am_token_emb = MuonState::new(vocab * d);
+        let mut am_pos_emb   = MuonState::new(t * d);
+        let mut am_wq  = MuonState::new(d * d);
+        let mut am_wk  = MuonState::new(d * d);
+        let mut am_wv  = MuonState::new(d * d);
+        let mut am_wo  = MuonState::new(d * d);
+        let mut am_wff1 = MuonState::new(ff * d);
+        let mut am_bff1 = MuonState::new(ff);
+        let mut am_wff2 = MuonState::new(d * ff);
+        let mut am_bff2 = MuonState::new(d);
+        let mut am_ln1g = MuonState::new(d);
+        let mut am_ln1b = MuonState::new(d);
+        let mut am_ln2g = MuonState::new(d);
+        let mut am_ln2b = MuonState::new(d);
+        let mut am_wout = MuonState::new(vocab * d);
+        let mut am_bout = MuonState::new(vocab);
 
         for ep in 0..epochs {
             let mut total_loss = 0.0f32;
@@ -638,22 +641,22 @@ impl ChatModel {
                     for v in g_bout.iter_mut(){ *v *= inv; }
 
                     // Adam updates
-                    am_token_emb.update(&mut self.token_emb, &g_token_emb, lr, adam_step, beta1, beta2, adam_eps);
-                    am_pos_emb.update(&mut self.pos_emb,     &g_pos_emb,   lr, adam_step, beta1, beta2, adam_eps);
-                    am_wq.update(&mut self.wq,   &g_wq,   lr, adam_step, beta1, beta2, adam_eps);
-                    am_wk.update(&mut self.wk,   &g_wk,   lr, adam_step, beta1, beta2, adam_eps);
-                    am_wv.update(&mut self.wv,   &g_wv,   lr, adam_step, beta1, beta2, adam_eps);
-                    am_wo.update(&mut self.wo,   &g_wo,   lr, adam_step, beta1, beta2, adam_eps);
-                    am_wff1.update(&mut self.wff1, &g_wff1, lr, adam_step, beta1, beta2, adam_eps);
-                    am_bff1.update(&mut self.bff1, &g_bff1, lr, adam_step, beta1, beta2, adam_eps);
-                    am_wff2.update(&mut self.wff2, &g_wff2, lr, adam_step, beta1, beta2, adam_eps);
-                    am_bff2.update(&mut self.bff2, &g_bff2, lr, adam_step, beta1, beta2, adam_eps);
-                    am_ln1g.update(&mut self.ln1_gamma, &g_ln1g, lr, adam_step, beta1, beta2, adam_eps);
-                    am_ln1b.update(&mut self.ln1_beta,  &g_ln1b, lr, adam_step, beta1, beta2, adam_eps);
-                    am_ln2g.update(&mut self.ln2_gamma, &g_ln2g, lr, adam_step, beta1, beta2, adam_eps);
-                    am_ln2b.update(&mut self.ln2_beta,  &g_ln2b, lr, adam_step, beta1, beta2, adam_eps);
-                    am_wout.update(&mut self.wout, &g_wout, lr, adam_step, beta1, beta2, adam_eps);
-                    am_bout.update(&mut self.bout, &g_bout, lr, adam_step, beta1, beta2, adam_eps);
+                    am_token_emb.update(&mut self.token_emb, &g_token_emb, lr, adam_step, muon_momentum, muon_eps);
+                    am_pos_emb.update(&mut self.pos_emb,     &g_pos_emb,   lr, adam_step, muon_momentum, muon_eps);
+                    am_wq.update(&mut self.wq,   &g_wq,   lr, adam_step, muon_momentum, muon_eps);
+                    am_wk.update(&mut self.wk,   &g_wk,   lr, adam_step, muon_momentum, muon_eps);
+                    am_wv.update(&mut self.wv,   &g_wv,   lr, adam_step, muon_momentum, muon_eps);
+                    am_wo.update(&mut self.wo,   &g_wo,   lr, adam_step, muon_momentum, muon_eps);
+                    am_wff1.update(&mut self.wff1, &g_wff1, lr, adam_step, muon_momentum, muon_eps);
+                    am_bff1.update(&mut self.bff1, &g_bff1, lr, adam_step, muon_momentum, muon_eps);
+                    am_wff2.update(&mut self.wff2, &g_wff2, lr, adam_step, muon_momentum, muon_eps);
+                    am_bff2.update(&mut self.bff2, &g_bff2, lr, adam_step, muon_momentum, muon_eps);
+                    am_ln1g.update(&mut self.ln1_gamma, &g_ln1g, lr, adam_step, muon_momentum, muon_eps);
+                    am_ln1b.update(&mut self.ln1_beta,  &g_ln1b, lr, adam_step, muon_momentum, muon_eps);
+                    am_ln2g.update(&mut self.ln2_gamma, &g_ln2g, lr, adam_step, muon_momentum, muon_eps);
+                    am_ln2b.update(&mut self.ln2_beta,  &g_ln2b, lr, adam_step, muon_momentum, muon_eps);
+                    am_wout.update(&mut self.wout, &g_wout, lr, adam_step, muon_momentum, muon_eps);
+                    am_bout.update(&mut self.bout, &g_bout, lr, adam_step, muon_momentum, muon_eps);
 
                     // Zero accumulators
                     g_token_emb.iter_mut().for_each(|v| *v = 0.0);
