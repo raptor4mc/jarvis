@@ -256,9 +256,16 @@ const IDENT_SUBWORD_TOKENS: [&str; 40] = [
     "format", "request", "response", "client", "server", "module", "path", "type", "data", "cache",
     "buffer",
 ];
+const NUM_SUFFIX_TOKENS: [&str; 13] = [
+    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32",
+];
 
 pub fn vocab_size() -> usize {
-    BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len() + IDENT_SUBWORD_TOKENS.len()
+    BASE_VOCAB
+        + RUST_TOKENS.len()
+        + IDENT_TOKENS.len()
+        + IDENT_SUBWORD_TOKENS.len()
+        + NUM_SUFFIX_TOKENS.len()
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -318,6 +325,52 @@ fn rust_token_idx(tok: &str) -> Option<i32> {
         .map(|idx| (BASE_VOCAB + idx) as i32)
 }
 
+fn tokenize_numeric_literal(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> bool {
+    if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
+        return false;
+    }
+    let start = *i;
+    *i += 1;
+    while *i < bytes.len() {
+        let c = bytes[*i];
+        if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'+' || c == b'-' {
+            *i += 1;
+        } else {
+            break;
+        }
+    }
+    let lit = std::str::from_utf8(&bytes[start..*i]).unwrap_or("");
+
+    // Try to split numeric suffixes into dedicated tokens.
+    let mut matched_suffix = false;
+    for suf in NUM_SUFFIX_TOKENS {
+        if let Some(num) = lit.strip_suffix(suf) {
+            for b in num.as_bytes() {
+                out.push(*b as i32);
+            }
+            let idx = NUM_SUFFIX_TOKENS
+                .iter()
+                .position(|s| *s == suf)
+                .unwrap_or(0);
+            out.push(
+                (BASE_VOCAB
+                    + RUST_TOKENS.len()
+                    + IDENT_TOKENS.len()
+                    + IDENT_SUBWORD_TOKENS.len()
+                    + idx) as i32,
+            );
+            matched_suffix = true;
+            break;
+        }
+    }
+    if !matched_suffix {
+        for b in lit.as_bytes() {
+            out.push(*b as i32);
+        }
+    }
+    true
+}
+
 pub fn tokenize_bytes(s: &str) -> Vec<i32> {
     let mut out = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -346,6 +399,8 @@ pub fn tokenize_bytes(s: &str) -> Vec<i32> {
         if let Some((idx, len)) = best {
             out.push((BASE_VOCAB + idx) as i32);
             i += len;
+        } else if tokenize_numeric_literal(bytes, &mut i, &mut out) {
+            continue;
         } else if is_ident_start(bytes[i]) {
             let start = i;
             i += 1;
@@ -444,6 +499,11 @@ pub fn detokenize_bytes(tokens: &[i32]) -> String {
                     let sub_idx = ident_idx - IDENT_TOKENS.len();
                     if sub_idx < IDENT_SUBWORD_TOKENS.len() {
                         out.push_str(IDENT_SUBWORD_TOKENS[sub_idx]);
+                    } else {
+                        let num_idx = sub_idx - IDENT_SUBWORD_TOKENS.len();
+                        if num_idx < NUM_SUFFIX_TOKENS.len() {
+                            out.push_str(NUM_SUFFIX_TOKENS[num_idx]);
+                        }
                     }
                 }
             }
