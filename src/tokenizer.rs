@@ -249,8 +249,16 @@ const IDENT_TOKENS: [&str; 36] = [
     "Self::new",
 ];
 
+const IDENT_SUBWORD_TOKENS: [&str; 40] = [
+    "my", "super", "long", "variable", "name", "with", "generics", "async", "await", "result",
+    "option", "future", "stream", "sender", "receiver", "channel", "token", "model", "train",
+    "test", "check", "build", "config", "state", "value", "index", "count", "error", "parse",
+    "format", "request", "response", "client", "server", "module", "path", "type", "data", "cache",
+    "buffer",
+];
+
 pub fn vocab_size() -> usize {
-    BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len()
+    BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len() + IDENT_SUBWORD_TOKENS.len()
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -259,6 +267,32 @@ fn is_ident_start(b: u8) -> bool {
 
 fn is_ident_continue(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric()
+}
+
+fn split_identifier_chunks(ident: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let bytes = ident.as_bytes();
+
+    for i in 1..bytes.len() {
+        let prev = bytes[i - 1];
+        let cur = bytes[i];
+        let boundary = cur == b'_'
+            || prev == b'_'
+            || (prev.is_ascii_lowercase() && cur.is_ascii_uppercase())
+            || (prev.is_ascii_alphabetic() && cur.is_ascii_digit())
+            || (prev.is_ascii_digit() && cur.is_ascii_alphabetic());
+        if boundary {
+            if start < i {
+                out.push(&ident[start..i]);
+            }
+            start = i;
+        }
+    }
+    if start < ident.len() {
+        out.push(&ident[start..]);
+    }
+    out
 }
 
 pub fn tokenize_bytes(s: &str) -> Vec<i32> {
@@ -299,8 +333,16 @@ pub fn tokenize_bytes(s: &str) -> Vec<i32> {
             if let Some(idx) = IDENT_TOKENS.iter().position(|t| *t == ident) {
                 out.push((BASE_VOCAB + RUST_TOKENS.len() + idx) as i32);
             } else {
-                for b in ident.as_bytes() {
-                    out.push(*b as i32);
+                for chunk in split_identifier_chunks(ident) {
+                    if let Some(idx) = IDENT_SUBWORD_TOKENS.iter().position(|t| *t == chunk) {
+                        out.push(
+                            (BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len() + idx) as i32,
+                        );
+                    } else {
+                        for b in chunk.as_bytes() {
+                            out.push(*b as i32);
+                        }
+                    }
                 }
             }
         } else {
@@ -325,6 +367,11 @@ pub fn detokenize_bytes(tokens: &[i32]) -> String {
                 let ident_idx = idx - RUST_TOKENS.len();
                 if ident_idx < IDENT_TOKENS.len() {
                     out.push_str(IDENT_TOKENS[ident_idx]);
+                } else {
+                    let sub_idx = ident_idx - IDENT_TOKENS.len();
+                    if sub_idx < IDENT_SUBWORD_TOKENS.len() {
+                        out.push_str(IDENT_SUBWORD_TOKENS[sub_idx]);
+                    }
                 }
             }
         }
