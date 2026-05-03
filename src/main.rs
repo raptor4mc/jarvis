@@ -847,8 +847,8 @@ fn main() {
     let reply_tokens_min = parse_usize_env("RINGTAIL_REPLY_TOKENS_MIN", 24, 8);
     let reply_tokens_max = parse_usize_env("RINGTAIL_REPLY_TOKENS_MAX", 192, reply_tokens_min);
 
-    let mut epochs_if_loaded = 3usize;
-    let mut epochs_if_fresh = 24usize;
+    let mut epochs_if_loaded = 2usize;
+    let mut epochs_if_fresh = 3usize;
     let mut batch_size = 32usize;
     let mut sample_stride = 1usize;
 
@@ -860,12 +860,12 @@ fn main() {
             }
         }
     }
+    let mut epochs_explicit = false;
     if let Ok(v) = std::env::var("RINGTAIL_EPOCHS") {
         if let Ok(n) = v.parse::<usize>() {
-            if n > 0 {
-                epochs_if_loaded = n;
-                epochs_if_fresh = n;
-            }
+            epochs_if_loaded = n;
+            epochs_if_fresh = n;
+            epochs_explicit = true;
         }
     }
     if let Ok(v) = std::env::var("RINGTAIL_BATCH_SIZE") {
@@ -882,12 +882,13 @@ fn main() {
             }
         }
     }
-    // Auto-scale epochs for larger runs unless explicitly overridden.
-    if std::env::var("RINGTAIL_EPOCHS").is_err() {
+    // Optional auto-scale for larger runs; off by default for predictable runtime.
+    let autoscale_epochs = parse_bool_env("RINGTAIL_AUTOSCALE_EPOCHS", false);
+    if autoscale_epochs && !epochs_explicit {
         let token_scale = (data.len() / 100_000).max(1);
-        let adaptive = (token_scale * 8).clamp(8, 80);
+        let adaptive = (token_scale * 4).clamp(4, 24);
         epochs_if_fresh = epochs_if_fresh.max(adaptive);
-        epochs_if_loaded = epochs_if_loaded.max((adaptive / 4).max(2));
+        epochs_if_loaded = epochs_if_loaded.max((adaptive / 3).max(2));
     }
 
     if data.len() < 16 {
