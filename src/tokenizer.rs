@@ -555,7 +555,14 @@ pub fn detokenize_bytes(tokens: &[i32]) -> String {
     let mut out = String::new();
     for &t in tokens {
         if (0..BASE_VOCAB as i32).contains(&t) {
-            out.push(t as u8 as char);
+            let b = t as u8;
+            if b == 0 {
+                continue;
+            }
+            if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
+                continue;
+            }
+            out.push(b as char);
         } else {
             let idx = (t as usize).saturating_sub(BASE_VOCAB);
             if idx < RUST_TOKENS.len() {
