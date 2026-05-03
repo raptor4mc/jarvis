@@ -23,6 +23,8 @@ Recommended corpus shape:
 - `RINGTAIL_DATA_INCLUDE`: optional comma-separated path substrings that must match.
 - `RINGTAIL_DATA_EXCLUDE`: optional comma-separated path substrings to ignore.
 - `RINGTAIL_MAX_TOKENS`: cap total training tokens.
+- `RINGTAIL_EPOCHS`: fixed epoch count for loaded/fresh runs (`0` disables training).
+- `RINGTAIL_AUTOSCALE_EPOCHS`: set to `1` to adapt epoch count from corpus size when `RINGTAIL_EPOCHS` is unset.
 - `RINGTAIL_REPLY_TOKENS_MIN` / `RINGTAIL_REPLY_TOKENS_MAX`: generation bounds for normal chat.
 - `RINGTAIL_BASE_MODEL_CMD`: optional stronger inference command. Ferris passes the full prompt in `RINGTAIL_PROMPT` and uses command stdout as the model answer (fallback is local model).
 
@@ -30,6 +32,8 @@ Recommended corpus shape:
 - Uses micro-batches + grad accumulation.
 - Reports both train and validation loss per epoch.
 - Uses corpus fingerprinting based on path + content hash to detect dataset changes.
+- Predictable defaults: fresh runs train for 3 epochs, loaded runs train for 2 epochs.
+- Auto-scaling is opt-in (disabled by default) to avoid surprise runtime spikes.
 
 ## CPU training profile (under ~7 minutes)
 Use this profile when you want fast CPU retraining without changing architecture.
