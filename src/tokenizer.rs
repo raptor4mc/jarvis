@@ -295,6 +295,29 @@ fn split_identifier_chunks(ident: &str) -> Vec<&str> {
     out
 }
 
+fn emit_identifier_token(ident: &str, out: &mut Vec<i32>) {
+    if let Some(idx) = IDENT_TOKENS.iter().position(|t| *t == ident) {
+        out.push((BASE_VOCAB + RUST_TOKENS.len() + idx) as i32);
+        return;
+    }
+    for chunk in split_identifier_chunks(ident) {
+        if let Some(idx) = IDENT_SUBWORD_TOKENS.iter().position(|t| *t == chunk) {
+            out.push((BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len() + idx) as i32);
+        } else {
+            for b in chunk.as_bytes() {
+                out.push(*b as i32);
+            }
+        }
+    }
+}
+
+fn rust_token_idx(tok: &str) -> Option<i32> {
+    RUST_TOKENS
+        .iter()
+        .position(|t| *t == tok)
+        .map(|idx| (BASE_VOCAB + idx) as i32)
+}
+
 pub fn tokenize_bytes(s: &str) -> Vec<i32> {
     let mut out = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -330,19 +353,69 @@ pub fn tokenize_bytes(s: &str) -> Vec<i32> {
                 i += 1;
             }
             let ident = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
-            if let Some(idx) = IDENT_TOKENS.iter().position(|t| *t == ident) {
-                out.push((BASE_VOCAB + RUST_TOKENS.len() + idx) as i32);
-            } else {
-                for chunk in split_identifier_chunks(ident) {
-                    if let Some(idx) = IDENT_SUBWORD_TOKENS.iter().position(|t| *t == chunk) {
-                        out.push(
-                            (BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len() + idx) as i32,
-                        );
+            emit_identifier_token(ident, &mut out);
+
+            // Generic module path: IDENT ("::" IDENT)+
+            while i + 2 <= bytes.len() && &bytes[i..i + 2] == b"::" {
+                if let Some(tok) = rust_token_idx("::") {
+                    out.push(tok);
+                } else {
+                    out.push(b':' as i32);
+                    out.push(b':' as i32);
+                }
+                i += 2;
+                let seg_start = i;
+                if i < bytes.len() && is_ident_start(bytes[i]) {
+                    i += 1;
+                    while i < bytes.len() && is_ident_continue(bytes[i]) {
+                        i += 1;
+                    }
+                    let seg = std::str::from_utf8(&bytes[seg_start..i]).unwrap_or("");
+                    emit_identifier_token(seg, &mut out);
+                } else {
+                    break;
+                }
+            }
+
+            // Generic forms: <IDENT>, <IDENT, IDENT>, <'a>, <'a, IDENT>
+            if i < bytes.len() && bytes[i] == b'<' {
+                let generic_start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'>' {
+                    i += 1;
+                }
+                if i < bytes.len() && bytes[i] == b'>' {
+                    let inner = std::str::from_utf8(&bytes[generic_start + 1..i]).unwrap_or("");
+                    if let Some(tok) = rust_token_idx("<") {
+                        out.push(tok);
                     } else {
-                        for b in chunk.as_bytes() {
-                            out.push(*b as i32);
+                        out.push(b'<' as i32);
+                    }
+                    for part in inner.split(',') {
+                        let p = part.trim();
+                        if p.starts_with('\'') {
+                            for b in p.as_bytes() {
+                                out.push(*b as i32);
+                            }
+                        } else if !p.is_empty() {
+                            emit_identifier_token(p, &mut out);
+                        }
+                        if part != inner.split(',').last().unwrap_or("") {
+                            if let Some(tok) = rust_token_idx(",") {
+                                out.push(tok);
+                            } else {
+                                out.push(b',' as i32);
+                            }
                         }
                     }
+                    if let Some(tok) = rust_token_idx(">") {
+                        out.push(tok);
+                    } else {
+                        out.push(b'>' as i32);
+                    }
+                    i += 1;
+                } else {
+                    i = generic_start;
                 }
             }
         } else {
