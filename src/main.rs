@@ -573,25 +573,88 @@ fn build_prompt_with_retrieval(
         return user_input.to_string();
     }
 
+    #[derive(Clone)]
+    struct RetrievalChunk {
+        path: String,
+        boundary: String,
+        content: String,
+        content_lc: String,
+    }
+
+    fn chunk_doc(doc: &CorpusDoc, max_chars: usize) -> Vec<RetrievalChunk> {
+        let mut starts = vec![0usize];
+        for (idx, _) in doc.content.match_indices("\nfn ") {
+            starts.push(idx + 1);
+        }
+        for (idx, _) in doc.content.match_indices("\nimpl ") {
+            starts.push(idx + 1);
+        }
+        for (idx, _) in doc.content.match_indices("\nmod ") {
+            starts.push(idx + 1);
+        }
+        starts.sort_unstable();
+        starts.dedup();
+
+        let mut chunks = Vec::new();
+        for w in starts.windows(2) {
+            let s = w[0];
+            let e = w[1];
+            if s >= e || s >= doc.content.len() {
+                continue;
+            }
+            let raw = &doc.content[s..e];
+            let snippet: String = raw.chars().take(max_chars.max(96)).collect();
+            let boundary = raw.lines().next().unwrap_or("").trim().to_string();
+            chunks.push(RetrievalChunk {
+                path: doc.path.clone(),
+                boundary,
+                content_lc: snippet.to_lowercase(),
+                content: snippet,
+            });
+        }
+        if let Some(&s) = starts.last() {
+            let raw = &doc.content[s..];
+            let snippet: String = raw.chars().take(max_chars.max(96)).collect();
+            chunks.push(RetrievalChunk {
+                path: doc.path.clone(),
+                boundary: raw.lines().next().unwrap_or("").trim().to_string(),
+                content_lc: snippet.to_lowercase(),
+                content: snippet,
+            });
+        }
+        if chunks.is_empty() {
+            chunks.push(RetrievalChunk {
+                path: doc.path.clone(),
+                boundary: "file".to_string(),
+                content: doc.content.chars().take(max_chars.max(96)).collect(),
+                content_lc: doc.content_lc.chars().take(max_chars.max(96)).collect(),
+            });
+        }
+        chunks
+    }
+
     let query_grams = char_trigrams(user_input);
-    let mut scored: Vec<(usize, f32)> = docs
+    let all_chunks: Vec<RetrievalChunk> = docs
+        .iter()
+        .flat_map(|d| chunk_doc(d, max_chars.saturating_mul(2)))
+        .collect();
+    let mut scored: Vec<(usize, f32)> = all_chunks
         .iter()
         .enumerate()
-        .filter_map(|(i, doc)| {
-            let path_lc = doc.path.to_lowercase();
+        .filter_map(|(i, ch)| {
+            let path_lc = ch.path.to_lowercase();
             let lexical = terms
                 .iter()
-                .map(|t| doc.content_lc.matches(t).count() + path_lc.matches(t).count() * 2)
+                .map(|t| {
+                    ch.content_lc.matches(t).count()
+                        + path_lc.matches(t).count() * 2
+                        + ch.boundary.to_lowercase().matches(t).count() * 3
+                })
                 .sum::<usize>();
-            let snippet: String = doc.content_lc.chars().take(max_chars.max(64)).collect();
-            let grams = char_trigrams(&(doc.path.clone() + " " + &snippet));
+            let grams = char_trigrams(&(ch.path.clone() + " " + &ch.content_lc));
             let semantic = jaccard_score(&query_grams, &grams);
-            let score = lexical as f32 + (semantic * 25.0);
-            if score > 0.0 {
-                Some((i, score))
-            } else {
-                None
-            }
+            let score = lexical as f32 + (semantic * 30.0);
+            (score > 0.0).then_some((i, score))
         })
         .collect();
 
@@ -604,14 +667,15 @@ fn build_prompt_with_retrieval(
     let mut prompt = String::new();
     prompt.push_str("<retrieved_context>\n");
     for (idx, score) in scored.into_iter().take(top_k.max(1)) {
-        let doc = &docs[idx];
-        let snippet: String = doc.content.chars().take(max_chars.max(64)).collect();
+        let ch = &all_chunks[idx];
         prompt.push_str("<context_file path=\"");
-        prompt.push_str(&doc.path);
+        prompt.push_str(&ch.path);
+        prompt.push_str("\" boundary=\"");
+        prompt.push_str(&ch.boundary);
         prompt.push_str("\" score=\"");
         prompt.push_str(&format!("{:.3}", score));
         prompt.push_str("\">\n");
-        prompt.push_str(&snippet);
+        prompt.push_str(&ch.content);
         prompt.push_str("\n</context_file>\n");
     }
     prompt.push_str("</retrieved_context>\n");
