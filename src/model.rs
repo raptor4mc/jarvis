@@ -428,6 +428,7 @@ impl ChatModel {
         } else {
             context.to_vec()
         };
+        let prompt_len = ctx.len();
 
         for _ in 0..length {
             let norm = self.normalize_context(&ctx);
@@ -441,7 +442,7 @@ impl ChatModel {
             ctx.push(next);
         }
 
-        crate::tokenizer::detokenize_bytes(&ctx)
+        crate::tokenizer::detokenize_bytes(&ctx[prompt_len..])
     }
 
     // ── train ────────────────────────────────────────────────────────────────
