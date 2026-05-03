@@ -121,8 +121,6 @@ fn clip_grad_norm(grads: &mut [f32], max_norm: f32) {
     }
 }
 
-// ── Muon optimizer state helper ───────────────────────────────────────────────
-
 struct AdamState {
     m: Vec<f32>,
     v: Vec<f32>,
@@ -156,48 +154,72 @@ impl AdamState {
     }
 }
 
-// ── ChatModel ────────────────────────────────────────────────────────────────
+struct LayerWeights {
+    pub wq: Vec<f32>,
+    pub wk: Vec<f32>,
+    pub wv: Vec<f32>,
+    pub wo: Vec<f32>,
+    pub wff1: Vec<f32>,
+    pub bff1: Vec<f32>,
+    pub wff2: Vec<f32>,
+    pub bff2: Vec<f32>,
+    pub ln1_gamma: Vec<f32>,
+    pub ln1_beta: Vec<f32>,
+    pub ln2_gamma: Vec<f32>,
+    pub ln2_beta: Vec<f32>,
+}
 
-pub struct ChatModel {
-    vocab: usize,
-    d: usize,  // model_dim
-    t: usize,  // seq_len
-    ff: usize, // feed-forward dim = 4 * d
+impl LayerWeights {
+    fn new(d: usize, ff: usize) -> Self {
+        let mut wq = vec![0.0; d * d];
+        let mut wk = vec![0.0; d * d];
+        let mut wv = vec![0.0; d * d];
+        let mut wo = vec![0.0; d * d];
+        let mut wff1 = vec![0.0; ff * d];
+        let mut wff2 = vec![0.0; d * ff];
 
-    token_emb: Vec<f32>, // vocab × d
-    pos_emb: Vec<f32>,   // t × d
+        wq.iter_mut().for_each(|v| *v = rand_weight());
+        wk.iter_mut().for_each(|v| *v = rand_weight());
+        wv.iter_mut().for_each(|v| *v = rand_weight());
+        wo.iter_mut().for_each(|v| *v = rand_weight());
+        wff1.iter_mut().for_each(|v| *v = rand_weight());
+        wff2.iter_mut().for_each(|v| *v = rand_weight());
 
+        Self {
+            wq,
+            wk,
+            wv,
+            wo,
+            wff1,
+            bff1: vec![0.0; ff],
+            wff2,
+            bff2: vec![0.0; d],
+            ln1_gamma: vec![1.0; d],
+            ln1_beta: vec![0.0; d],
+            ln2_gamma: vec![1.0; d],
+            ln2_beta: vec![0.0; d],
+        }
+    }
+}
+
+struct LayerGrads {
     wq: Vec<f32>,
     wk: Vec<f32>,
     wv: Vec<f32>,
-    wo: Vec<f32>, // d × d
+    wo: Vec<f32>,
     wff1: Vec<f32>,
-    bff1: Vec<f32>, // ff × d,  ff
+    bff1: Vec<f32>,
     wff2: Vec<f32>,
-    bff2: Vec<f32>, // d × ff,  d
-
+    bff2: Vec<f32>,
     ln1_gamma: Vec<f32>,
-    ln1_beta: Vec<f32>, // d
+    ln1_beta: Vec<f32>,
     ln2_gamma: Vec<f32>,
-    ln2_beta: Vec<f32>, // d
-
-    wout: Vec<f32>,
-    bout: Vec<f32>, // vocab × d,  vocab
+    ln2_beta: Vec<f32>,
 }
 
-impl ChatModel {
-    pub fn new(vocab: usize, model_dim: usize, seq_len: usize) -> Self {
-        let d = model_dim;
-        let t = seq_len;
-        let ff = model_dim * 4;
-
-        let mut m = ChatModel {
-            vocab,
-            d,
-            t,
-            ff,
-            token_emb: vec![0.0; vocab * d],
-            pos_emb: vec![0.0; t * d],
+impl LayerGrads {
+    fn new(d: usize, ff: usize) -> Self {
+        Self {
             wq: vec![0.0; d * d],
             wk: vec![0.0; d * d],
             wv: vec![0.0; d * d],
@@ -206,97 +228,107 @@ impl ChatModel {
             bff1: vec![0.0; ff],
             wff2: vec![0.0; d * ff],
             bff2: vec![0.0; d],
-            ln1_gamma: vec![1.0; d],
+            ln1_gamma: vec![0.0; d],
             ln1_beta: vec![0.0; d],
-            ln2_gamma: vec![1.0; d],
+            ln2_gamma: vec![0.0; d],
             ln2_beta: vec![0.0; d],
-            wout: vec![0.0; vocab * d],
+        }
+    }
+
+    fn zero(&mut self) {
+        self.wq.fill(0.0);
+        self.wk.fill(0.0);
+        self.wv.fill(0.0);
+        self.wo.fill(0.0);
+        self.wff1.fill(0.0);
+        self.bff1.fill(0.0);
+        self.wff2.fill(0.0);
+        self.bff2.fill(0.0);
+        self.ln1_gamma.fill(0.0);
+        self.ln1_beta.fill(0.0);
+        self.ln2_gamma.fill(0.0);
+        self.ln2_beta.fill(0.0);
+    }
+}
+
+struct LayerAdamState {
+    wq: AdamState,
+    wk: AdamState,
+    wv: AdamState,
+    wo: AdamState,
+    wff1: AdamState,
+    bff1: AdamState,
+    wff2: AdamState,
+    bff2: AdamState,
+    ln1_gamma: AdamState,
+    ln1_beta: AdamState,
+    ln2_gamma: AdamState,
+    ln2_beta: AdamState,
+}
+
+impl LayerAdamState {
+    fn new(d: usize, ff: usize) -> Self {
+        Self {
+            wq: AdamState::new(d * d),
+            wk: AdamState::new(d * d),
+            wv: AdamState::new(d * d),
+            wo: AdamState::new(d * d),
+            wff1: AdamState::new(ff * d),
+            bff1: AdamState::new(ff),
+            wff2: AdamState::new(d * ff),
+            bff2: AdamState::new(d),
+            ln1_gamma: AdamState::new(d),
+            ln1_beta: AdamState::new(d),
+            ln2_gamma: AdamState::new(d),
+            ln2_beta: AdamState::new(d),
+        }
+    }
+}
+
+pub struct ChatModel {
+    vocab: usize,
+    d: usize,
+    t: usize,
+    ff: usize,
+    num_heads: usize,
+    num_layers: usize,
+    token_emb: Vec<f32>,
+    layers: Vec<LayerWeights>,
+    wout: Vec<f32>,
+    bout: Vec<f32>,
+}
+
+impl ChatModel {
+    pub fn new(vocab: usize, d: usize, t: usize, num_layers: usize, num_heads: usize) -> Self {
+        if d % num_heads != 0 {
+            panic!(
+                "model_dim ({}) must be divisible by num_heads ({})",
+                d, num_heads
+            );
+        }
+
+        let ff = d * 4;
+        let mut token_emb = vec![0.0; vocab * d];
+        token_emb.iter_mut().for_each(|v| *v = rand_weight());
+
+        let mut wout = vec![0.0; vocab * d];
+        wout.iter_mut().for_each(|v| *v = rand_weight());
+
+        let layers = (0..num_layers).map(|_| LayerWeights::new(d, ff)).collect();
+
+        Self {
+            vocab,
+            d,
+            t,
+            ff,
+            num_heads,
+            num_layers,
+            token_emb,
+            layers,
+            wout,
             bout: vec![0.0; vocab],
-        };
-
-        for v in m.token_emb.iter_mut() {
-            *v = rand_weight();
         }
-        for v in m.pos_emb.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wq.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wk.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wv.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wo.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wff1.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wff2.iter_mut() {
-            *v = rand_weight();
-        }
-        for v in m.wout.iter_mut() {
-            *v = rand_weight();
-        }
-
-        m
     }
-
-    // ── weight IO ────────────────────────────────────────────────────────────
-
-    pub fn load_weights(&mut self, path: &str) -> bool {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-        let mut r = BufReader::new(file);
-        let ok = read_mat(&mut r, &mut self.token_emb)
-            && read_mat(&mut r, &mut self.pos_emb)
-            && read_mat(&mut r, &mut self.wq)
-            && read_mat(&mut r, &mut self.wk)
-            && read_mat(&mut r, &mut self.wv)
-            && read_mat(&mut r, &mut self.wo)
-            && read_mat(&mut r, &mut self.wff1)
-            && read_mat(&mut r, &mut self.bff1)
-            && read_mat(&mut r, &mut self.wff2)
-            && read_mat(&mut r, &mut self.bff2)
-            && read_mat(&mut r, &mut self.ln1_gamma)
-            && read_mat(&mut r, &mut self.ln1_beta)
-            && read_mat(&mut r, &mut self.ln2_gamma)
-            && read_mat(&mut r, &mut self.ln2_beta)
-            && read_mat(&mut r, &mut self.wout)
-            && read_mat(&mut r, &mut self.bout);
-        ok
-    }
-
-    pub fn save_weights(&self, path: &str) -> bool {
-        let file = match File::create(path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-        let mut w = BufWriter::new(file);
-        write_mat(&mut w, &self.token_emb)
-            && write_mat(&mut w, &self.pos_emb)
-            && write_mat(&mut w, &self.wq)
-            && write_mat(&mut w, &self.wk)
-            && write_mat(&mut w, &self.wv)
-            && write_mat(&mut w, &self.wo)
-            && write_mat(&mut w, &self.wff1)
-            && write_mat(&mut w, &self.bff1)
-            && write_mat(&mut w, &self.wff2)
-            && write_mat(&mut w, &self.bff2)
-            && write_mat(&mut w, &self.ln1_gamma)
-            && write_mat(&mut w, &self.ln1_beta)
-            && write_mat(&mut w, &self.ln2_gamma)
-            && write_mat(&mut w, &self.ln2_beta)
-            && write_mat(&mut w, &self.wout)
-            && write_mat(&mut w, &self.bout)
-    }
-
-    // ── context normalisation ─────────────────────────────────────────────────
 
     fn normalize_context(&self, tokens: &[i32]) -> Vec<i32> {
         if tokens.is_empty() {
@@ -312,33 +344,27 @@ impl ChatModel {
         }
     }
 
-    // ── forward pass (last hidden state) ────────────────────────────────────
-
     pub fn forward_last_hidden(&self, tokens: &[i32]) -> Vec<f32> {
         let ctx = self.normalize_context(tokens);
         let (d, t) = (self.d, self.t);
+        let layer = &self.layers[0];
 
-        // Embedding lookup: x[t] = token_emb[tok] + pos_emb[t]
         let x: Vec<Vec<f32>> = (0..t)
             .map(|i| {
                 let tok = ctx[i] as usize;
-                (0..d)
-                    .map(|j| self.token_emb[idx2d(tok, j, d)] + self.pos_emb[idx2d(i, j, d)])
-                    .collect()
+                (0..d).map(|j| self.token_emb[idx2d(tok, j, d)]).collect()
             })
             .collect();
 
-        // Q K V projections
         let mut q: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
         let mut k: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
         let mut v: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
         for i in 0..t {
-            matvec(&self.wq, &x[i], &mut q[i], d, d);
-            matvec(&self.wk, &x[i], &mut k[i], d, d);
-            matvec(&self.wv, &x[i], &mut v[i], d, d);
+            matvec(&layer.wq, &x[i], &mut q[i], d, d);
+            matvec(&layer.wk, &x[i], &mut k[i], d, d);
+            matvec(&layer.wv, &x[i], &mut v[i], d, d);
         }
 
-        // Causal self-attention
         let scale = 1.0 / (d as f32).sqrt();
         let mut attn_out: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
         for ti in 0..t {
@@ -351,10 +377,9 @@ impl ChatModel {
             for j in 0..=ti {
                 axpy(&mut head, &v[j], a[j]);
             }
-            matvec(&self.wo, &head, &mut attn_out[ti], d, d);
+            matvec(&layer.wo, &head, &mut attn_out[ti], d, d);
         }
 
-        // Residual + LayerNorm 1
         let h1: Vec<Vec<f32>> = (0..t)
             .map(|i| {
                 let pre: Vec<f32> = x[i]
@@ -362,30 +387,113 @@ impl ChatModel {
                     .zip(attn_out[i].iter())
                     .map(|(&a, &b)| a + b)
                     .collect();
-                layer_norm_forward(&pre, &self.ln1_gamma, &self.ln1_beta)
+                layer_norm_forward(&pre, &layer.ln1_gamma, &layer.ln1_beta)
             })
             .collect();
 
-        // FFN + Residual + LayerNorm 2
         let h2: Vec<Vec<f32>> = (0..t)
             .map(|i| {
                 let mut ff = vec![0.0f32; self.ff];
-                matvec(&self.wff1, &h1[i], &mut ff, self.ff, d);
+                matvec(&layer.wff1, &h1[i], &mut ff, self.ff, d);
                 for j in 0..self.ff {
-                    let z = ff[j] + self.bff1[j];
-                    ff[j] = if z > 0.0 { z } else { 0.0 }; // ReLU
+                    let z = ff[j] + layer.bff1[j];
+                    ff[j] = if z > 0.0 { z } else { 0.0 };
                 }
                 let mut ff2 = vec![0.0f32; d];
-                matvec(&self.wff2, &ff, &mut ff2, d, self.ff);
-                let pre2: Vec<f32> = (0..d).map(|j| h1[i][j] + self.bff2[j] + ff2[j]).collect();
-                layer_norm_forward(&pre2, &self.ln2_gamma, &self.ln2_beta)
+                matvec(&layer.wff2, &ff, &mut ff2, d, self.ff);
+                let pre2: Vec<f32> = (0..d).map(|j| h1[i][j] + layer.bff2[j] + ff2[j]).collect();
+                layer_norm_forward(&pre2, &layer.ln2_gamma, &layer.ln2_beta)
             })
             .collect();
 
         h2[t - 1].clone()
     }
 
-    // ── token sampling ───────────────────────────────────────────────────────
+    pub fn save_weights(&self, path: &str) -> bool {
+        let file = match File::create(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut w = BufWriter::new(file);
+        if w.write_all(&(self.vocab as u64).to_le_bytes()).is_err()
+            || w.write_all(&(self.d as u64).to_le_bytes()).is_err()
+            || w.write_all(&(self.num_layers as u64).to_le_bytes()).is_err()
+            || w.write_all(&(self.num_heads as u64).to_le_bytes()).is_err()
+        {
+            return false;
+        }
+
+        if !write_mat(&mut w, &self.token_emb) {
+            return false;
+        }
+        for layer in &self.layers {
+            if !write_mat(&mut w, &layer.wq)
+                || !write_mat(&mut w, &layer.wk)
+                || !write_mat(&mut w, &layer.wv)
+                || !write_mat(&mut w, &layer.wo)
+                || !write_mat(&mut w, &layer.wff1)
+                || !write_mat(&mut w, &layer.bff1)
+                || !write_mat(&mut w, &layer.wff2)
+                || !write_mat(&mut w, &layer.bff2)
+                || !write_mat(&mut w, &layer.ln1_gamma)
+                || !write_mat(&mut w, &layer.ln1_beta)
+                || !write_mat(&mut w, &layer.ln2_gamma)
+                || !write_mat(&mut w, &layer.ln2_beta)
+            {
+                return false;
+            }
+        }
+
+        write_mat(&mut w, &self.wout) && write_mat(&mut w, &self.bout)
+    }
+
+    pub fn load_weights(&mut self, path: &str) -> bool {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut r = BufReader::new(file);
+
+        let mut header = [0u8; 32];
+        if r.read_exact(&mut header).is_err() {
+            return false;
+        }
+        let vocab = u64::from_le_bytes(header[0..8].try_into().unwrap()) as usize;
+        let d = u64::from_le_bytes(header[8..16].try_into().unwrap()) as usize;
+        let num_layers = u64::from_le_bytes(header[16..24].try_into().unwrap()) as usize;
+        let num_heads = u64::from_le_bytes(header[24..32].try_into().unwrap()) as usize;
+
+        if vocab != self.vocab
+            || d != self.d
+            || num_layers != self.num_layers
+            || num_heads != self.num_heads
+        {
+            return false;
+        }
+
+        if !read_mat(&mut r, &mut self.token_emb) {
+            return false;
+        }
+        for layer in &mut self.layers {
+            if !read_mat(&mut r, &mut layer.wq)
+                || !read_mat(&mut r, &mut layer.wk)
+                || !read_mat(&mut r, &mut layer.wv)
+                || !read_mat(&mut r, &mut layer.wo)
+                || !read_mat(&mut r, &mut layer.wff1)
+                || !read_mat(&mut r, &mut layer.bff1)
+                || !read_mat(&mut r, &mut layer.wff2)
+                || !read_mat(&mut r, &mut layer.bff2)
+                || !read_mat(&mut r, &mut layer.ln1_gamma)
+                || !read_mat(&mut r, &mut layer.ln1_beta)
+                || !read_mat(&mut r, &mut layer.ln2_gamma)
+                || !read_mat(&mut r, &mut layer.ln2_beta)
+            {
+                return false;
+            }
+        }
+
+        read_mat(&mut r, &mut self.wout) && read_mat(&mut r, &mut self.bout)
+    }
 
     fn sample_next_token(&self, logits: &[f32], temperature: f64, deterministic: bool) -> i32 {
         if deterministic {
@@ -400,7 +508,6 @@ impl ChatModel {
         let scaled: Vec<f32> = logits.iter().map(|&l| l / temp).collect();
         let probs = softmax(&scaled);
 
-        // simple linear search cumulative sample
         let r: f32 = {
             use std::sync::atomic::{AtomicU64, Ordering};
             static R: AtomicU64 = AtomicU64::new(987654321);
@@ -417,8 +524,6 @@ impl ChatModel {
         (probs.len() - 1) as i32
     }
 
-    // ── generate ─────────────────────────────────────────────────────────────
-
     pub fn generate(
         &self,
         context: &[i32],
@@ -426,11 +531,7 @@ impl ChatModel {
         temperature: f64,
         deterministic: bool,
     ) -> String {
-        let mut ctx = if context.is_empty() {
-            vec![0i32]
-        } else {
-            context.to_vec()
-        };
+        let mut ctx = if context.is_empty() { vec![0i32] } else { context.to_vec() };
         let prompt_len = ctx.len();
 
         for _ in 0..length {
@@ -447,8 +548,6 @@ impl ChatModel {
 
         crate::tokenizer::detokenize_bytes(&ctx[prompt_len..])
     }
-
-    // ── train ────────────────────────────────────────────────────────────────
 
     pub fn train(
         &mut self,
@@ -500,42 +599,18 @@ impl ChatModel {
         let adam_eps = 1e-8f32;
         let mut adam_step = 0i32;
 
-        // Adam states — one per parameter tensor (flattened)
         let mut am_token_emb = AdamState::new(vocab * d);
-        let mut am_pos_emb = AdamState::new(t * d);
-        let mut am_wq = AdamState::new(d * d);
-        let mut am_wk = AdamState::new(d * d);
-        let mut am_wv = AdamState::new(d * d);
-        let mut am_wo = AdamState::new(d * d);
-        let mut am_wff1 = AdamState::new(ff * d);
-        let mut am_bff1 = AdamState::new(ff);
-        let mut am_wff2 = AdamState::new(d * ff);
-        let mut am_bff2 = AdamState::new(d);
-        let mut am_ln1g = AdamState::new(d);
-        let mut am_ln1b = AdamState::new(d);
-        let mut am_ln2g = AdamState::new(d);
-        let mut am_ln2b = AdamState::new(d);
+        let mut layer_adam: Vec<LayerAdamState> =
+            (0..self.num_layers).map(|_| LayerAdamState::new(d, ff)).collect();
         let mut am_wout = AdamState::new(vocab * d);
         let mut am_bout = AdamState::new(vocab);
 
         for ep in 0..epochs {
             let mut total_loss = 0.0f32;
 
-            // Accumulated gradient buffers
             let mut g_token_emb = vec![0.0f32; vocab * d];
-            let mut g_pos_emb = vec![0.0f32; t * d];
-            let mut g_wq = vec![0.0f32; d * d];
-            let mut g_wk = vec![0.0f32; d * d];
-            let mut g_wv = vec![0.0f32; d * d];
-            let mut g_wo = vec![0.0f32; d * d];
-            let mut g_wff1 = vec![0.0f32; ff * d];
-            let mut g_bff1 = vec![0.0f32; ff];
-            let mut g_wff2 = vec![0.0f32; d * ff];
-            let mut g_bff2 = vec![0.0f32; d];
-            let mut g_ln1g = vec![0.0f32; d];
-            let mut g_ln1b = vec![0.0f32; d];
-            let mut g_ln2g = vec![0.0f32; d];
-            let mut g_ln2b = vec![0.0f32; d];
+            let mut layer_grads: Vec<LayerGrads> =
+                (0..self.num_layers).map(|_| LayerGrads::new(d, ff)).collect();
             let mut g_wout = vec![0.0f32; vocab * d];
             let mut g_bout = vec![0.0f32; vocab];
 
@@ -547,36 +622,28 @@ impl ChatModel {
                 let batch_end = (batch_start + batch_size).min(train_starts.len());
                 let b_count = batch_end - batch_start;
 
-                // ── forward pass for each sample in the micro-batch ──────────
-
                 for bi in 0..b_count {
                     let start = train_starts[batch_start + bi];
                     let ctx_tokens = &data[start..start + t];
                     let target = data[start + t] as usize;
+                    let layer = &self.layers[0];
 
-                    // Embeddings
                     let x: Vec<Vec<f32>> = (0..t)
                         .map(|i| {
                             let tok = ctx_tokens[i] as usize;
-                            (0..d)
-                                .map(|j| {
-                                    self.token_emb[idx2d(tok, j, d)] + self.pos_emb[idx2d(i, j, d)]
-                                })
-                                .collect()
+                            (0..d).map(|j| self.token_emb[idx2d(tok, j, d)]).collect()
                         })
                         .collect();
 
-                    // Q K V
                     let mut q: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
                     let mut k_all: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
                     let mut v_all: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
                     for i in 0..t {
-                        matvec(&self.wq, &x[i], &mut q[i], d, d);
-                        matvec(&self.wk, &x[i], &mut k_all[i], d, d);
-                        matvec(&self.wv, &x[i], &mut v_all[i], d, d);
+                        matvec(&layer.wq, &x[i], &mut q[i], d, d);
+                        matvec(&layer.wk, &x[i], &mut k_all[i], d, d);
+                        matvec(&layer.wv, &x[i], &mut v_all[i], d, d);
                     }
 
-                    // Causal attention at last position
                     let mut scores = vec![f32::NEG_INFINITY; t];
                     for j in 0..t {
                         scores[j] = dot(&q[last], &k_all[j]) * scale;
@@ -588,49 +655,36 @@ impl ChatModel {
                     }
 
                     let mut attn_out = vec![0.0f32; d];
-                    matvec(&self.wo, &head, &mut attn_out, d, d);
+                    matvec(&layer.wo, &head, &mut attn_out, d, d);
 
-                    // Residual + LN1
                     let pre1: Vec<f32> = (0..d).map(|j| x[last][j] + attn_out[j]).collect();
-                    let h1 = layer_norm_forward(&pre1, &self.ln1_gamma, &self.ln1_beta);
+                    let h1 = layer_norm_forward(&pre1, &layer.ln1_gamma, &layer.ln1_beta);
 
-                    // FFN
                     let mut ff_pre = vec![0.0f32; ff];
-                    matvec(&self.wff1, &h1, &mut ff_pre, ff, d);
+                    matvec(&layer.wff1, &h1, &mut ff_pre, ff, d);
                     let ff_act: Vec<f32> = (0..ff)
                         .map(|i| {
-                            let z = ff_pre[i] + self.bff1[i];
-                            ff_pre[i] = z; // store pre-activation for backward
-                            if z > 0.0 {
-                                z
-                            } else {
-                                0.0
-                            }
+                            let z = ff_pre[i] + layer.bff1[i];
+                            ff_pre[i] = z;
+                            if z > 0.0 { z } else { 0.0 }
                         })
                         .collect();
 
                     let mut ff2 = vec![0.0f32; d];
-                    matvec(&self.wff2, &ff_act, &mut ff2, d, ff);
-                    let pre2: Vec<f32> = (0..d).map(|j| h1[j] + self.bff2[j] + ff2[j]).collect();
-                    let h2 = layer_norm_forward(&pre2, &self.ln2_gamma, &self.ln2_beta);
+                    matvec(&layer.wff2, &ff_act, &mut ff2, d, ff);
+                    let pre2: Vec<f32> = (0..d).map(|j| h1[j] + layer.bff2[j] + ff2[j]).collect();
+                    let h2 = layer_norm_forward(&pre2, &layer.ln2_gamma, &layer.ln2_beta);
 
-                    // Output logits
                     let mut logits = vec![0.0f32; vocab];
                     matvec(&self.wout, &h2, &mut logits, vocab, d);
-                    for kk in 0..vocab {
-                        logits[kk] += self.bout[kk];
-                    }
+                    for kk in 0..vocab { logits[kk] += self.bout[kk]; }
 
                     let probs = softmax(&logits);
                     total_loss += -(probs[target] + 1e-12).ln();
 
-                    // ── backward pass ────────────────────────────────────────
-
-                    // dL/dlogits = probs - one_hot(target)
                     let mut dz: Vec<f32> = probs.clone();
                     dz[target] -= 1.0;
 
-                    // LM head backward
                     let mut dh2 = vec![0.0f32; d];
                     for kk in 0..vocab {
                         g_bout[kk] += dz[kk];
@@ -640,60 +694,51 @@ impl ChatModel {
                         }
                     }
 
-                    // LN2 backward
                     let mut dln2g = vec![0.0f32; d];
                     let mut dln2b = vec![0.0f32; d];
-                    let dpre2 =
-                        layer_norm_backward(&pre2, &self.ln2_gamma, &dh2, &mut dln2g, &mut dln2b);
+                    let dpre2 = layer_norm_backward(&pre2, &layer.ln2_gamma, &dh2, &mut dln2g, &mut dln2b);
                     for j in 0..d {
-                        g_ln2g[j] += dln2g[j];
-                        g_ln2b[j] += dln2b[j];
+                        layer_grads[0].ln2_gamma[j] += dln2g[j];
+                        layer_grads[0].ln2_beta[j] += dln2b[j];
                     }
 
-                    // FFN backward
                     let mut dh1 = dpre2.clone();
                     let dff2_grad = dpre2.clone();
                     let mut dff_act = vec![0.0f32; ff];
                     for i in 0..d {
-                        g_bff2[i] += dff2_grad[i];
+                        layer_grads[0].bff2[i] += dff2_grad[i];
                         for j in 0..ff {
-                            g_wff2[idx2d(i, j, ff)] += dff2_grad[i] * ff_act[j];
-                            dff_act[j] += self.wff2[idx2d(i, j, ff)] * dff2_grad[i];
-                        }
-                    }
-                    // ReLU backward
-                    let mut dff_pre_grad = vec![0.0f32; ff];
-                    for i in 0..ff {
-                        dff_pre_grad[i] = if ff_pre[i] > 0.0 { dff_act[i] } else { 0.0 };
-                    }
-                    for i in 0..ff {
-                        g_bff1[i] += dff_pre_grad[i];
-                        for j in 0..d {
-                            g_wff1[idx2d(i, j, d)] += dff_pre_grad[i] * h1[j];
-                            dh1[j] += self.wff1[idx2d(i, j, d)] * dff_pre_grad[i];
+                            layer_grads[0].wff2[idx2d(i, j, ff)] += dff2_grad[i] * ff_act[j];
+                            dff_act[j] += layer.wff2[idx2d(i, j, ff)] * dff2_grad[i];
                         }
                     }
 
-                    // LN1 backward
+                    let mut dff_pre_grad = vec![0.0f32; ff];
+                    for i in 0..ff { dff_pre_grad[i] = if ff_pre[i] > 0.0 { dff_act[i] } else { 0.0 }; }
+                    for i in 0..ff {
+                        layer_grads[0].bff1[i] += dff_pre_grad[i];
+                        for j in 0..d {
+                            layer_grads[0].wff1[idx2d(i, j, d)] += dff_pre_grad[i] * h1[j];
+                            dh1[j] += layer.wff1[idx2d(i, j, d)] * dff_pre_grad[i];
+                        }
+                    }
+
                     let mut dln1g = vec![0.0f32; d];
                     let mut dln1b = vec![0.0f32; d];
-                    let dpre1 =
-                        layer_norm_backward(&pre1, &self.ln1_gamma, &dh1, &mut dln1g, &mut dln1b);
+                    let dpre1 = layer_norm_backward(&pre1, &layer.ln1_gamma, &dh1, &mut dln1g, &mut dln1b);
                     for j in 0..d {
-                        g_ln1g[j] += dln1g[j];
-                        g_ln1b[j] += dln1b[j];
+                        layer_grads[0].ln1_gamma[j] += dln1g[j];
+                        layer_grads[0].ln1_beta[j] += dln1b[j];
                     }
 
-                    // Attention output backward
                     let mut dhead = vec![0.0f32; d];
                     for i in 0..d {
                         for j in 0..d {
-                            g_wo[idx2d(i, j, d)] += dpre1[i] * head[j];
-                            dhead[j] += self.wo[idx2d(i, j, d)] * dpre1[i];
+                            layer_grads[0].wo[idx2d(i, j, d)] += dpre1[i] * head[j];
+                            dhead[j] += layer.wo[idx2d(i, j, d)] * dpre1[i];
                         }
                     }
 
-                    // Attention backward
                     let mut da = vec![0.0f32; t];
                     let mut dv_all: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
                     for j in 0..t {
@@ -715,40 +760,34 @@ impl ChatModel {
                         }
                     }
 
-                    // Q projection backward (only last position)
                     let mut dx_last = dpre1.clone();
                     for i in 0..d {
                         for j in 0..d {
-                            g_wq[idx2d(i, j, d)] += dq_last[i] * x[last][j];
-                            dx_last[j] += self.wq[idx2d(i, j, d)] * dq_last[i];
+                            layer_grads[0].wq[idx2d(i, j, d)] += dq_last[i] * x[last][j];
+                            dx_last[j] += layer.wq[idx2d(i, j, d)] * dq_last[i];
                         }
                     }
 
-                    // K V projection backward (all positions)
                     let mut dx_all: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
                     for j in 0..t {
                         for i in 0..d {
                             for dd in 0..d {
-                                g_wk[idx2d(i, dd, d)] += dk_all[j][i] * x[j][dd];
-                                g_wv[idx2d(i, dd, d)] += dv_all[j][i] * x[j][dd];
-                                dx_all[j][dd] += self.wk[idx2d(i, dd, d)] * dk_all[j][i]
-                                    + self.wv[idx2d(i, dd, d)] * dv_all[j][i];
+                                layer_grads[0].wk[idx2d(i, dd, d)] += dk_all[j][i] * x[j][dd];
+                                layer_grads[0].wv[idx2d(i, dd, d)] += dv_all[j][i] * x[j][dd];
+                                dx_all[j][dd] += layer.wk[idx2d(i, dd, d)] * dk_all[j][i]
+                                    + layer.wv[idx2d(i, dd, d)] * dv_all[j][i];
                             }
                         }
                     }
-                    for dd in 0..d {
-                        dx_all[last][dd] += dx_last[dd];
-                    }
+                    for dd in 0..d { dx_all[last][dd] += dx_last[dd]; }
 
-                    // Embedding backward
                     for ti in 0..t {
                         let tok = ctx_tokens[ti] as usize;
                         for dd in 0..d {
                             g_token_emb[idx2d(tok, dd, d)] += dx_all[ti][dd];
-                            g_pos_emb[idx2d(ti, dd, d)] += dx_all[ti][dd];
                         }
                     }
-                } // end sample loop
+                }
 
                 accum_samples += b_count;
                 accum_steps += 1;
@@ -760,185 +799,40 @@ impl ChatModel {
                     adam_step += 1;
                     let inv = 1.0 / accum_samples as f32;
 
-                    // Scale gradients
-                    for v in g_token_emb.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_pos_emb.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wq.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wk.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wv.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wo.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wff1.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_bff1.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wff2.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_bff2.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_ln1g.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_ln1b.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_ln2g.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_ln2b.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_wout.iter_mut() {
-                        *v *= inv;
-                    }
-                    for v in g_bout.iter_mut() {
-                        *v *= inv;
-                    }
+                    for v in g_token_emb.iter_mut() { *v *= inv; }
+                    layer_grads[0].wq.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].wk.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].wv.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].wo.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].wff1.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].bff1.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].wff2.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].bff2.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].ln1_gamma.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].ln1_beta.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].ln2_gamma.iter_mut().for_each(|v| *v *= inv);
+                    layer_grads[0].ln2_beta.iter_mut().for_each(|v| *v *= inv);
+                    for v in g_wout.iter_mut() { *v *= inv; }
+                    for v in g_bout.iter_mut() { *v *= inv; }
 
-                    // Adam updates
-                    am_token_emb.update(
-                        &mut self.token_emb,
-                        &g_token_emb,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_pos_emb.update(
-                        &mut self.pos_emb,
-                        &g_pos_emb,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_wq.update(&mut self.wq, &g_wq, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wk.update(&mut self.wk, &g_wk, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wv.update(&mut self.wv, &g_wv, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wo.update(&mut self.wo, &g_wo, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wff1.update(
-                        &mut self.wff1,
-                        &g_wff1,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_bff1.update(
-                        &mut self.bff1,
-                        &g_bff1,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_wff2.update(
-                        &mut self.wff2,
-                        &g_wff2,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_bff2.update(
-                        &mut self.bff2,
-                        &g_bff2,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_ln1g.update(
-                        &mut self.ln1_gamma,
-                        &g_ln1g,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_ln1b.update(
-                        &mut self.ln1_beta,
-                        &g_ln1b,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_ln2g.update(
-                        &mut self.ln2_gamma,
-                        &g_ln2g,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_ln2b.update(
-                        &mut self.ln2_beta,
-                        &g_ln2b,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_wout.update(
-                        &mut self.wout,
-                        &g_wout,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
-                    am_bout.update(
-                        &mut self.bout,
-                        &g_bout,
-                        lr,
-                        adam_step,
-                        adam_beta1,
-                        adam_beta2,
-                        adam_eps,
-                    );
+                    am_token_emb.update(&mut self.token_emb, &g_token_emb, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].wq.update(&mut self.layers[0].wq, &layer_grads[0].wq, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].wk.update(&mut self.layers[0].wk, &layer_grads[0].wk, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].wv.update(&mut self.layers[0].wv, &layer_grads[0].wv, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].wo.update(&mut self.layers[0].wo, &layer_grads[0].wo, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].wff1.update(&mut self.layers[0].wff1, &layer_grads[0].wff1, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].bff1.update(&mut self.layers[0].bff1, &layer_grads[0].bff1, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].wff2.update(&mut self.layers[0].wff2, &layer_grads[0].wff2, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].bff2.update(&mut self.layers[0].bff2, &layer_grads[0].bff2, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].ln1_gamma.update(&mut self.layers[0].ln1_gamma, &layer_grads[0].ln1_gamma, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].ln1_beta.update(&mut self.layers[0].ln1_beta, &layer_grads[0].ln1_beta, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].ln2_gamma.update(&mut self.layers[0].ln2_gamma, &layer_grads[0].ln2_gamma, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    layer_adam[0].ln2_beta.update(&mut self.layers[0].ln2_beta, &layer_grads[0].ln2_beta, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    am_wout.update(&mut self.wout, &g_wout, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    am_bout.update(&mut self.bout, &g_bout, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
 
-                    // Zero accumulators
                     g_token_emb.iter_mut().for_each(|v| *v = 0.0);
-                    g_pos_emb.iter_mut().for_each(|v| *v = 0.0);
-                    g_wq.iter_mut().for_each(|v| *v = 0.0);
-                    g_wk.iter_mut().for_each(|v| *v = 0.0);
-                    g_wv.iter_mut().for_each(|v| *v = 0.0);
-                    g_wo.iter_mut().for_each(|v| *v = 0.0);
-                    g_wff1.iter_mut().for_each(|v| *v = 0.0);
-                    g_bff1.iter_mut().for_each(|v| *v = 0.0);
-                    g_wff2.iter_mut().for_each(|v| *v = 0.0);
-                    g_bff2.iter_mut().for_each(|v| *v = 0.0);
-                    g_ln1g.iter_mut().for_each(|v| *v = 0.0);
-                    g_ln1b.iter_mut().for_each(|v| *v = 0.0);
-                    g_ln2g.iter_mut().for_each(|v| *v = 0.0);
-                    g_ln2b.iter_mut().for_each(|v| *v = 0.0);
+                    layer_grads[0].zero();
                     g_wout.iter_mut().for_each(|v| *v = 0.0);
                     g_bout.iter_mut().for_each(|v| *v = 0.0);
 
@@ -957,9 +851,7 @@ impl ChatModel {
                 let h = self.forward_last_hidden(ctx_tokens);
                 let mut logits = vec![0.0f32; vocab];
                 matvec(&self.wout, &h, &mut logits, vocab, d);
-                for kk in 0..vocab {
-                    logits[kk] += self.bout[kk];
-                }
+                for kk in 0..vocab { logits[kk] += self.bout[kk]; }
                 let probs = softmax(&logits);
                 val_total += -(probs[target] + 1e-12).ln();
             }
@@ -973,25 +865,25 @@ impl ChatModel {
             );
         }
     }
+
 }
 
-// ── binary weight IO helpers ─────────────────────────────────────────────────
-
-fn read_mat(r: &mut BufReader<File>, buf: &mut Vec<f32>) -> bool {
-    let byte_len = buf.len() * 4;
-    let mut bytes = vec![0u8; byte_len];
-    match r.read_exact(&mut bytes) {
-        Ok(_) => {
-            for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-                buf[i] = f32::from_le_bytes(chunk.try_into().unwrap());
-            }
-            true
-        }
-        Err(_) => false,
+fn read_mat<R: Read>(r: &mut R, mat: &mut [f32]) -> bool {
+    let mut buf = vec![0u8; mat.len() * 4];
+    if r.read_exact(&mut buf).is_err() {
+        return false;
     }
+    for (i, chunk) in buf.chunks_exact(4).enumerate() {
+        mat[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    true
 }
 
-fn write_mat(w: &mut BufWriter<File>, buf: &[f32]) -> bool {
-    let bytes: Vec<u8> = buf.iter().flat_map(|&f| f.to_le_bytes()).collect();
-    w.write_all(&bytes).is_ok()
+fn write_mat<W: Write>(w: &mut W, mat: &[f32]) -> bool {
+    let mut buf = vec![0u8; mat.len() * 4];
+    for (i, &v) in mat.iter().enumerate() {
+        let b = v.to_le_bytes();
+        buf[i * 4..i * 4 + 4].copy_from_slice(&b);
+    }
+    w.write_all(&buf).is_ok()
 }
