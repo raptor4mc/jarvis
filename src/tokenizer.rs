@@ -5,7 +5,7 @@
 
 const BASE_VOCAB: usize = 256;
 
-const RUST_TOKENS: [&str; 157] = [
+const RUST_TOKENS: [&str; 165] = [
     "fn ",
     "let ",
     "mut ",
@@ -121,6 +121,14 @@ const RUST_TOKENS: [&str; 157] = [
     "String::",
     "format!",
     "println!",
+    "vec!",
+    "macro_rules!",
+    "todo!",
+    "unimplemented!",
+    "assert!",
+    "assert_eq!",
+    "assert_ne!",
+    "dbg!",
     "Result<",
     "Option<",
     "Box<",
