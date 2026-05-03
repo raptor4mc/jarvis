@@ -259,6 +259,7 @@ const IDENT_SUBWORD_TOKENS: [&str; 40] = [
 const NUM_SUFFIX_TOKENS: [&str; 13] = [
     "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32",
 ];
+const COMMENT_TAG_TOKENS: [&str; 5] = ["TODO:", "SAFETY:", "FIXME:", "NOTE:", "SAFETY: "];
 
 pub fn vocab_size() -> usize {
     BASE_VOCAB
@@ -266,6 +267,7 @@ pub fn vocab_size() -> usize {
         + IDENT_TOKENS.len()
         + IDENT_SUBWORD_TOKENS.len()
         + NUM_SUFFIX_TOKENS.len()
+        + COMMENT_TAG_TOKENS.len()
 }
 
 fn is_ident_start(b: u8) -> bool {
@@ -371,6 +373,69 @@ fn tokenize_numeric_literal(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> 
     true
 }
 
+fn tokenize_string_literal(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> bool {
+    if *i >= bytes.len() || bytes[*i] != b'"' {
+        return false;
+    }
+    out.push(b'"' as i32);
+    *i += 1;
+    let start = *i;
+    while *i < bytes.len() {
+        if bytes[*i] == b'\\' {
+            *i += 2;
+            continue;
+        }
+        if *i < bytes.len() && bytes[*i] == b'"' {
+            break;
+        }
+        *i += 1;
+    }
+    let content = std::str::from_utf8(&bytes[start..(*i).min(bytes.len())]).unwrap_or("");
+    for word in content.split_whitespace() {
+        emit_identifier_token(word, out);
+        out.push(b' ' as i32);
+    }
+    if out.last() == Some(&(b' ' as i32)) {
+        out.pop();
+    }
+    if *i < bytes.len() && bytes[*i] == b'"' {
+        out.push(b'"' as i32);
+        *i += 1;
+    }
+    true
+}
+
+fn tokenize_comment_tag(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> bool {
+    if *i + 2 > bytes.len() || &bytes[*i..*i + 2] != b"//" {
+        return false;
+    }
+    let line_end = bytes[*i..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map(|p| *i + p)
+        .unwrap_or(bytes.len());
+    let line = std::str::from_utf8(&bytes[*i + 2..line_end])
+        .unwrap_or("")
+        .trim_start();
+    for (idx, tag) in COMMENT_TAG_TOKENS.iter().enumerate() {
+        if line.starts_with(tag.trim()) {
+            out.push(b'/' as i32);
+            out.push(b'/' as i32);
+            out.push(
+                (BASE_VOCAB
+                    + RUST_TOKENS.len()
+                    + IDENT_TOKENS.len()
+                    + IDENT_SUBWORD_TOKENS.len()
+                    + NUM_SUFFIX_TOKENS.len()
+                    + idx) as i32,
+            );
+            *i += 2 + line.len();
+            return true;
+        }
+    }
+    false
+}
+
 pub fn tokenize_bytes(s: &str) -> Vec<i32> {
     let mut out = Vec::with_capacity(s.len());
     let bytes = s.as_bytes();
@@ -399,6 +464,10 @@ pub fn tokenize_bytes(s: &str) -> Vec<i32> {
         if let Some((idx, len)) = best {
             out.push((BASE_VOCAB + idx) as i32);
             i += len;
+        } else if tokenize_comment_tag(bytes, &mut i, &mut out) {
+            continue;
+        } else if tokenize_string_literal(bytes, &mut i, &mut out) {
+            continue;
         } else if tokenize_numeric_literal(bytes, &mut i, &mut out) {
             continue;
         } else if is_ident_start(bytes[i]) {
@@ -503,6 +572,11 @@ pub fn detokenize_bytes(tokens: &[i32]) -> String {
                         let num_idx = sub_idx - IDENT_SUBWORD_TOKENS.len();
                         if num_idx < NUM_SUFFIX_TOKENS.len() {
                             out.push_str(NUM_SUFFIX_TOKENS[num_idx]);
+                        } else {
+                            let comment_idx = num_idx - NUM_SUFFIX_TOKENS.len();
+                            if comment_idx < COMMENT_TAG_TOKENS.len() {
+                                out.push_str(COMMENT_TAG_TOKENS[comment_idx]);
+                            }
                         }
                     }
                 }
