@@ -45,7 +45,9 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 
 /// y += alpha * x
 fn axpy(y: &mut [f32], x: &[f32], alpha: f32) {
-    y.iter_mut().zip(x.iter()).for_each(|(yi, &xi)| *yi += alpha * xi);
+    y.iter_mut()
+        .zip(x.iter())
+        .for_each(|(yi, &xi)| *yi += alpha * xi);
 }
 
 /// Row-major matrix-vector: y = A * x   (A is rows×cols)
@@ -96,14 +98,20 @@ fn layer_norm_backward(
     let sum_dxhat_xhat: f32 = dxhat.iter().zip(xhat.iter()).map(|(&a, &b)| a * b).sum();
 
     (0..n)
-        .map(|i| {
-            (1.0 / nf) * inv_std * (nf * dxhat[i] - sum_dxhat - xhat[i] * sum_dxhat_xhat)
-        })
+        .map(|i| (1.0 / nf) * inv_std * (nf * dxhat[i] - sum_dxhat - xhat[i] * sum_dxhat_xhat))
         .collect()
 }
 
 fn snap_batch_size(b: usize) -> usize {
-    if b <= 4 { 4 } else if b <= 8 { 8 } else if b <= 16 { 16 } else { 32 }
+    if b <= 4 {
+        4
+    } else if b <= 8 {
+        8
+    } else if b <= 16 {
+        16
+    } else {
+        32
+    }
 }
 
 // ── Muon optimizer state helper ───────────────────────────────────────────────
@@ -115,10 +123,21 @@ struct MuonState {
 
 impl MuonState {
     fn new(n: usize) -> Self {
-        Self { m: vec![0.0; n], v: vec![0.0; n] }
+        Self {
+            m: vec![0.0; n],
+            v: vec![0.0; n],
+        }
     }
 
-    fn update(&mut self, params: &mut [f32], grads: &[f32], lr: f32, step: i32, momentum: f32, eps: f32) {
+    fn update(
+        &mut self,
+        params: &mut [f32],
+        grads: &[f32],
+        lr: f32,
+        step: i32,
+        momentum: f32,
+        eps: f32,
+    ) {
         let bias_correction = 1.0 - momentum.powi(step);
         for i in 0..params.len() {
             self.m[i] = momentum * self.m[i] + (1.0 - momentum) * grads[i];
@@ -139,52 +158,87 @@ impl MuonState {
 
 pub struct ChatModel {
     vocab: usize,
-    d: usize,   // model_dim
-    t: usize,   // seq_len
-    ff: usize,  // feed-forward dim = 4 * d
+    d: usize,  // model_dim
+    t: usize,  // seq_len
+    ff: usize, // feed-forward dim = 4 * d
 
     token_emb: Vec<f32>, // vocab × d
-    pos_emb:   Vec<f32>, // t × d
+    pos_emb: Vec<f32>,   // t × d
 
-    wq: Vec<f32>, wk: Vec<f32>, wv: Vec<f32>, wo: Vec<f32>, // d × d
-    wff1: Vec<f32>, bff1: Vec<f32>, // ff × d,  ff
-    wff2: Vec<f32>, bff2: Vec<f32>, // d × ff,  d
+    wq: Vec<f32>,
+    wk: Vec<f32>,
+    wv: Vec<f32>,
+    wo: Vec<f32>, // d × d
+    wff1: Vec<f32>,
+    bff1: Vec<f32>, // ff × d,  ff
+    wff2: Vec<f32>,
+    bff2: Vec<f32>, // d × ff,  d
 
-    ln1_gamma: Vec<f32>, ln1_beta: Vec<f32>, // d
-    ln2_gamma: Vec<f32>, ln2_beta: Vec<f32>, // d
+    ln1_gamma: Vec<f32>,
+    ln1_beta: Vec<f32>, // d
+    ln2_gamma: Vec<f32>,
+    ln2_beta: Vec<f32>, // d
 
-    wout: Vec<f32>, bout: Vec<f32>, // vocab × d,  vocab
+    wout: Vec<f32>,
+    bout: Vec<f32>, // vocab × d,  vocab
 }
 
 impl ChatModel {
     pub fn new(vocab: usize, model_dim: usize, seq_len: usize) -> Self {
-        let d  = model_dim;
-        let t  = seq_len;
+        let d = model_dim;
+        let t = seq_len;
         let ff = model_dim * 4;
 
         let mut m = ChatModel {
             vocab,
-            d, t, ff,
+            d,
+            t,
+            ff,
             token_emb: vec![0.0; vocab * d],
-            pos_emb:   vec![0.0; t * d],
-            wq: vec![0.0; d * d], wk: vec![0.0; d * d],
-            wv: vec![0.0; d * d], wo: vec![0.0; d * d],
-            wff1: vec![0.0; ff * d], bff1: vec![0.0; ff],
-            wff2: vec![0.0; d * ff], bff2: vec![0.0; d],
-            ln1_gamma: vec![1.0; d], ln1_beta: vec![0.0; d],
-            ln2_gamma: vec![1.0; d], ln2_beta: vec![0.0; d],
-            wout: vec![0.0; vocab * d], bout: vec![0.0; vocab],
+            pos_emb: vec![0.0; t * d],
+            wq: vec![0.0; d * d],
+            wk: vec![0.0; d * d],
+            wv: vec![0.0; d * d],
+            wo: vec![0.0; d * d],
+            wff1: vec![0.0; ff * d],
+            bff1: vec![0.0; ff],
+            wff2: vec![0.0; d * ff],
+            bff2: vec![0.0; d],
+            ln1_gamma: vec![1.0; d],
+            ln1_beta: vec![0.0; d],
+            ln2_gamma: vec![1.0; d],
+            ln2_beta: vec![0.0; d],
+            wout: vec![0.0; vocab * d],
+            bout: vec![0.0; vocab],
         };
 
-        for v in m.token_emb.iter_mut() { *v = rand_weight(); }
-        for v in m.pos_emb.iter_mut()   { *v = rand_weight(); }
-        for v in m.wq.iter_mut()  { *v = rand_weight(); }
-        for v in m.wk.iter_mut()  { *v = rand_weight(); }
-        for v in m.wv.iter_mut()  { *v = rand_weight(); }
-        for v in m.wo.iter_mut()  { *v = rand_weight(); }
-        for v in m.wff1.iter_mut(){ *v = rand_weight(); }
-        for v in m.wff2.iter_mut(){ *v = rand_weight(); }
-        for v in m.wout.iter_mut(){ *v = rand_weight(); }
+        for v in m.token_emb.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.pos_emb.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wq.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wk.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wv.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wo.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wff1.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wff2.iter_mut() {
+            *v = rand_weight();
+        }
+        for v in m.wout.iter_mut() {
+            *v = rand_weight();
+        }
 
         m
     }
@@ -192,7 +246,10 @@ impl ChatModel {
     // ── weight IO ────────────────────────────────────────────────────────────
 
     pub fn load_weights(&mut self, path: &str) -> bool {
-        let file = match File::open(path) { Ok(f) => f, Err(_) => return false };
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
         let mut r = BufReader::new(file);
         let ok = read_mat(&mut r, &mut self.token_emb)
             && read_mat(&mut r, &mut self.pos_emb)
@@ -214,7 +271,10 @@ impl ChatModel {
     }
 
     pub fn save_weights(&self, path: &str) -> bool {
-        let file = match File::create(path) { Ok(f) => f, Err(_) => return false };
+        let file = match File::create(path) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
         let mut w = BufWriter::new(file);
         write_mat(&mut w, &self.token_emb)
             && write_mat(&mut w, &self.pos_emb)
@@ -281,17 +341,25 @@ impl ChatModel {
         let mut attn_out: Vec<Vec<f32>> = vec![vec![0.0; d]; t];
         for ti in 0..t {
             let mut scores = vec![f32::NEG_INFINITY; t];
-            for j in 0..=ti { scores[j] = dot(&q[ti], &k[j]) * scale; }
+            for j in 0..=ti {
+                scores[j] = dot(&q[ti], &k[j]) * scale;
+            }
             let a = softmax(&scores);
             let mut head = vec![0.0f32; d];
-            for j in 0..=ti { axpy(&mut head, &v[j], a[j]); }
+            for j in 0..=ti {
+                axpy(&mut head, &v[j], a[j]);
+            }
             matvec(&self.wo, &head, &mut attn_out[ti], d, d);
         }
 
         // Residual + LayerNorm 1
         let h1: Vec<Vec<f32>> = (0..t)
             .map(|i| {
-                let pre: Vec<f32> = x[i].iter().zip(attn_out[i].iter()).map(|(&a, &b)| a + b).collect();
+                let pre: Vec<f32> = x[i]
+                    .iter()
+                    .zip(attn_out[i].iter())
+                    .map(|(&a, &b)| a + b)
+                    .collect();
                 layer_norm_forward(&pre, &self.ln1_gamma, &self.ln1_beta)
             })
             .collect();
@@ -340,22 +408,36 @@ impl ChatModel {
         let mut cum = 0.0f32;
         for (k, &p) in probs.iter().enumerate() {
             cum += p;
-            if r <= cum { return k as i32; }
+            if r <= cum {
+                return k as i32;
+            }
         }
         (probs.len() - 1) as i32
     }
 
     // ── generate ─────────────────────────────────────────────────────────────
 
-    pub fn generate(&self, context: &[i32], length: usize, temperature: f64, deterministic: bool) -> String {
-        let mut ctx = if context.is_empty() { vec![0i32] } else { context.to_vec() };
+    pub fn generate(
+        &self,
+        context: &[i32],
+        length: usize,
+        temperature: f64,
+        deterministic: bool,
+    ) -> String {
+        let mut ctx = if context.is_empty() {
+            vec![0i32]
+        } else {
+            context.to_vec()
+        };
 
         for _ in 0..length {
             let norm = self.normalize_context(&ctx);
             let h = self.forward_last_hidden(&norm);
             let mut logits = vec![0.0f32; self.vocab];
             matvec(&self.wout, &h, &mut logits, self.vocab, self.d);
-            for k in 0..self.vocab { logits[k] += self.bout[k]; }
+            for k in 0..self.vocab {
+                logits[k] += self.bout[k];
+            }
             let next = self.sample_next_token(&logits, temperature, deterministic);
             ctx.push(next);
         }
@@ -365,22 +447,46 @@ impl ChatModel {
 
     // ── train ────────────────────────────────────────────────────────────────
 
-    pub fn train(&mut self, data: &[i32], epochs: usize, lr: f32, batch_size: usize, sample_stride: usize) {
+    pub fn train(
+        &mut self,
+        data: &[i32],
+        epochs: usize,
+        lr: f32,
+        batch_size: usize,
+        sample_stride: usize,
+    ) {
         let (d, t, ff, vocab) = (self.d, self.t, self.ff, self.vocab);
-        if data.len() <= t { return; }
+        if data.len() <= t {
+            return;
+        }
 
         let batch_size = snap_batch_size(batch_size.max(1));
         let sample_stride = sample_stride.max(1);
 
         let sample_starts: Vec<usize> = (0..data.len() - t).step_by(sample_stride).collect();
         let sample_count = sample_starts.len();
-        if sample_count == 0 { return; }
+        if sample_count == 0 {
+            return;
+        }
+        let val_count = (sample_count / 20).max(1);
+        let train_count = sample_count.saturating_sub(val_count).max(1);
+        let train_starts = &sample_starts[..train_count];
+        let val_starts = &sample_starts[train_count..];
 
-        let grad_accum_steps = if batch_size == 4 { 4 } else if batch_size == 8 { 2 } else { 1 };
+        let grad_accum_steps = if batch_size == 4 {
+            4
+        } else if batch_size == 8 {
+            2
+        } else {
+            1
+        };
 
         println!(
             "Samples: {}, stride: {}, micro-batch: {}, grad_accum: {}, effective batch: {}",
-            sample_count, sample_stride, batch_size, grad_accum_steps,
+            train_count,
+            sample_stride,
+            batch_size,
+            grad_accum_steps,
             batch_size * grad_accum_steps
         );
 
@@ -392,11 +498,11 @@ impl ChatModel {
 
         // Adam states — one per parameter tensor (flattened)
         let mut am_token_emb = MuonState::new(vocab * d);
-        let mut am_pos_emb   = MuonState::new(t * d);
-        let mut am_wq  = MuonState::new(d * d);
-        let mut am_wk  = MuonState::new(d * d);
-        let mut am_wv  = MuonState::new(d * d);
-        let mut am_wo  = MuonState::new(d * d);
+        let mut am_pos_emb = MuonState::new(t * d);
+        let mut am_wq = MuonState::new(d * d);
+        let mut am_wk = MuonState::new(d * d);
+        let mut am_wv = MuonState::new(d * d);
+        let mut am_wo = MuonState::new(d * d);
         let mut am_wff1 = MuonState::new(ff * d);
         let mut am_bff1 = MuonState::new(ff);
         let mut am_wff2 = MuonState::new(d * ff);
@@ -413,11 +519,11 @@ impl ChatModel {
 
             // Accumulated gradient buffers
             let mut g_token_emb = vec![0.0f32; vocab * d];
-            let mut g_pos_emb   = vec![0.0f32; t * d];
-            let mut g_wq  = vec![0.0f32; d * d];
-            let mut g_wk  = vec![0.0f32; d * d];
-            let mut g_wv  = vec![0.0f32; d * d];
-            let mut g_wo  = vec![0.0f32; d * d];
+            let mut g_pos_emb = vec![0.0f32; t * d];
+            let mut g_wq = vec![0.0f32; d * d];
+            let mut g_wk = vec![0.0f32; d * d];
+            let mut g_wv = vec![0.0f32; d * d];
+            let mut g_wo = vec![0.0f32; d * d];
             let mut g_wff1 = vec![0.0f32; ff * d];
             let mut g_bff1 = vec![0.0f32; ff];
             let mut g_wff2 = vec![0.0f32; d * ff];
@@ -430,17 +536,17 @@ impl ChatModel {
             let mut g_bout = vec![0.0f32; vocab];
 
             let mut accum_samples = 0usize;
-            let mut accum_steps   = 0usize;
+            let mut accum_steps = 0usize;
 
             let mut batch_start = 0;
-            while batch_start < sample_starts.len() {
-                let batch_end = (batch_start + batch_size).min(sample_starts.len());
+            while batch_start < train_starts.len() {
+                let batch_end = (batch_start + batch_size).min(train_starts.len());
                 let b_count = batch_end - batch_start;
 
                 // ── forward pass for each sample in the micro-batch ──────────
 
                 for bi in 0..b_count {
-                    let start = sample_starts[batch_start + bi];
+                    let start = train_starts[batch_start + bi];
                     let ctx_tokens = &data[start..start + t];
                     let target = data[start + t] as usize;
 
@@ -448,7 +554,11 @@ impl ChatModel {
                     let x: Vec<Vec<f32>> = (0..t)
                         .map(|i| {
                             let tok = ctx_tokens[i] as usize;
-                            (0..d).map(|j| self.token_emb[idx2d(tok, j, d)] + self.pos_emb[idx2d(i, j, d)]).collect()
+                            (0..d)
+                                .map(|j| {
+                                    self.token_emb[idx2d(tok, j, d)] + self.pos_emb[idx2d(i, j, d)]
+                                })
+                                .collect()
                         })
                         .collect();
 
@@ -464,10 +574,14 @@ impl ChatModel {
 
                     // Causal attention at last position
                     let mut scores = vec![f32::NEG_INFINITY; t];
-                    for j in 0..t { scores[j] = dot(&q[last], &k_all[j]) * scale; }
+                    for j in 0..t {
+                        scores[j] = dot(&q[last], &k_all[j]) * scale;
+                    }
                     let a = softmax(&scores);
                     let mut head = vec![0.0f32; d];
-                    for j in 0..t { axpy(&mut head, &v_all[j], a[j]); }
+                    for j in 0..t {
+                        axpy(&mut head, &v_all[j], a[j]);
+                    }
 
                     let mut attn_out = vec![0.0f32; d];
                     matvec(&self.wo, &head, &mut attn_out, d, d);
@@ -479,11 +593,17 @@ impl ChatModel {
                     // FFN
                     let mut ff_pre = vec![0.0f32; ff];
                     matvec(&self.wff1, &h1, &mut ff_pre, ff, d);
-                    let ff_act: Vec<f32> = (0..ff).map(|i| {
-                        let z = ff_pre[i] + self.bff1[i];
-                        ff_pre[i] = z; // store pre-activation for backward
-                        if z > 0.0 { z } else { 0.0 }
-                    }).collect();
+                    let ff_act: Vec<f32> = (0..ff)
+                        .map(|i| {
+                            let z = ff_pre[i] + self.bff1[i];
+                            ff_pre[i] = z; // store pre-activation for backward
+                            if z > 0.0 {
+                                z
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
 
                     let mut ff2 = vec![0.0f32; d];
                     matvec(&self.wff2, &ff_act, &mut ff2, d, ff);
@@ -493,7 +613,9 @@ impl ChatModel {
                     // Output logits
                     let mut logits = vec![0.0f32; vocab];
                     matvec(&self.wout, &h2, &mut logits, vocab, d);
-                    for kk in 0..vocab { logits[kk] += self.bout[kk]; }
+                    for kk in 0..vocab {
+                        logits[kk] += self.bout[kk];
+                    }
 
                     let probs = softmax(&logits);
                     total_loss += -(probs[target] + 1e-12).ln();
@@ -517,8 +639,12 @@ impl ChatModel {
                     // LN2 backward
                     let mut dln2g = vec![0.0f32; d];
                     let mut dln2b = vec![0.0f32; d];
-                    let dpre2 = layer_norm_backward(&pre2, &self.ln2_gamma, &dh2, &mut dln2g, &mut dln2b);
-                    for j in 0..d { g_ln2g[j] += dln2g[j]; g_ln2b[j] += dln2b[j]; }
+                    let dpre2 =
+                        layer_norm_backward(&pre2, &self.ln2_gamma, &dh2, &mut dln2g, &mut dln2b);
+                    for j in 0..d {
+                        g_ln2g[j] += dln2g[j];
+                        g_ln2b[j] += dln2b[j];
+                    }
 
                     // FFN backward
                     let mut dh1 = dpre2.clone();
@@ -533,7 +659,9 @@ impl ChatModel {
                     }
                     // ReLU backward
                     let mut dff_pre_grad = vec![0.0f32; ff];
-                    for i in 0..ff { dff_pre_grad[i] = if ff_pre[i] > 0.0 { dff_act[i] } else { 0.0 }; }
+                    for i in 0..ff {
+                        dff_pre_grad[i] = if ff_pre[i] > 0.0 { dff_act[i] } else { 0.0 };
+                    }
                     for i in 0..ff {
                         g_bff1[i] += dff_pre_grad[i];
                         for j in 0..d {
@@ -545,8 +673,12 @@ impl ChatModel {
                     // LN1 backward
                     let mut dln1g = vec![0.0f32; d];
                     let mut dln1b = vec![0.0f32; d];
-                    let dpre1 = layer_norm_backward(&pre1, &self.ln1_gamma, &dh1, &mut dln1g, &mut dln1b);
-                    for j in 0..d { g_ln1g[j] += dln1g[j]; g_ln1b[j] += dln1b[j]; }
+                    let dpre1 =
+                        layer_norm_backward(&pre1, &self.ln1_gamma, &dh1, &mut dln1g, &mut dln1b);
+                    for j in 0..d {
+                        g_ln1g[j] += dln1g[j];
+                        g_ln1b[j] += dln1b[j];
+                    }
 
                     // Attention output backward
                     let mut dhead = vec![0.0f32; d];
@@ -596,18 +728,20 @@ impl ChatModel {
                                 g_wk[idx2d(i, dd, d)] += dk_all[j][i] * x[j][dd];
                                 g_wv[idx2d(i, dd, d)] += dv_all[j][i] * x[j][dd];
                                 dx_all[j][dd] += self.wk[idx2d(i, dd, d)] * dk_all[j][i]
-                                               + self.wv[idx2d(i, dd, d)] * dv_all[j][i];
+                                    + self.wv[idx2d(i, dd, d)] * dv_all[j][i];
                             }
                         }
                     }
-                    for dd in 0..d { dx_all[last][dd] += dx_last[dd]; }
+                    for dd in 0..d {
+                        dx_all[last][dd] += dx_last[dd];
+                    }
 
                     // Embedding backward
                     for ti in 0..t {
                         let tok = ctx_tokens[ti] as usize;
                         for dd in 0..d {
                             g_token_emb[idx2d(tok, dd, d)] += dx_all[ti][dd];
-                            g_pos_emb[idx2d(ti, dd, d)]    += dx_all[ti][dd];
+                            g_pos_emb[idx2d(ti, dd, d)] += dx_all[ti][dd];
                         }
                     }
                 } // end sample loop
@@ -615,7 +749,7 @@ impl ChatModel {
                 accum_samples += b_count;
                 accum_steps += 1;
 
-                let is_last_batch = batch_end == sample_starts.len();
+                let is_last_batch = batch_end == train_starts.len();
                 let should_step = accum_steps >= grad_accum_steps || is_last_batch;
 
                 if should_step {
@@ -623,40 +757,156 @@ impl ChatModel {
                     let inv = 1.0 / accum_samples as f32;
 
                     // Scale gradients
-                    for v in g_token_emb.iter_mut() { *v *= inv; }
-                    for v in g_pos_emb.iter_mut()   { *v *= inv; }
-                    for v in g_wq.iter_mut()  { *v *= inv; }
-                    for v in g_wk.iter_mut()  { *v *= inv; }
-                    for v in g_wv.iter_mut()  { *v *= inv; }
-                    for v in g_wo.iter_mut()  { *v *= inv; }
-                    for v in g_wff1.iter_mut(){ *v *= inv; }
-                    for v in g_bff1.iter_mut(){ *v *= inv; }
-                    for v in g_wff2.iter_mut(){ *v *= inv; }
-                    for v in g_bff2.iter_mut(){ *v *= inv; }
-                    for v in g_ln1g.iter_mut(){ *v *= inv; }
-                    for v in g_ln1b.iter_mut(){ *v *= inv; }
-                    for v in g_ln2g.iter_mut(){ *v *= inv; }
-                    for v in g_ln2b.iter_mut(){ *v *= inv; }
-                    for v in g_wout.iter_mut(){ *v *= inv; }
-                    for v in g_bout.iter_mut(){ *v *= inv; }
+                    for v in g_token_emb.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_pos_emb.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wq.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wk.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wv.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wo.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wff1.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_bff1.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wff2.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_bff2.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_ln1g.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_ln1b.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_ln2g.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_ln2b.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_wout.iter_mut() {
+                        *v *= inv;
+                    }
+                    for v in g_bout.iter_mut() {
+                        *v *= inv;
+                    }
 
                     // Adam updates
-                    am_token_emb.update(&mut self.token_emb, &g_token_emb, lr, adam_step, muon_momentum, muon_eps);
-                    am_pos_emb.update(&mut self.pos_emb,     &g_pos_emb,   lr, adam_step, muon_momentum, muon_eps);
-                    am_wq.update(&mut self.wq,   &g_wq,   lr, adam_step, muon_momentum, muon_eps);
-                    am_wk.update(&mut self.wk,   &g_wk,   lr, adam_step, muon_momentum, muon_eps);
-                    am_wv.update(&mut self.wv,   &g_wv,   lr, adam_step, muon_momentum, muon_eps);
-                    am_wo.update(&mut self.wo,   &g_wo,   lr, adam_step, muon_momentum, muon_eps);
-                    am_wff1.update(&mut self.wff1, &g_wff1, lr, adam_step, muon_momentum, muon_eps);
-                    am_bff1.update(&mut self.bff1, &g_bff1, lr, adam_step, muon_momentum, muon_eps);
-                    am_wff2.update(&mut self.wff2, &g_wff2, lr, adam_step, muon_momentum, muon_eps);
-                    am_bff2.update(&mut self.bff2, &g_bff2, lr, adam_step, muon_momentum, muon_eps);
-                    am_ln1g.update(&mut self.ln1_gamma, &g_ln1g, lr, adam_step, muon_momentum, muon_eps);
-                    am_ln1b.update(&mut self.ln1_beta,  &g_ln1b, lr, adam_step, muon_momentum, muon_eps);
-                    am_ln2g.update(&mut self.ln2_gamma, &g_ln2g, lr, adam_step, muon_momentum, muon_eps);
-                    am_ln2b.update(&mut self.ln2_beta,  &g_ln2b, lr, adam_step, muon_momentum, muon_eps);
-                    am_wout.update(&mut self.wout, &g_wout, lr, adam_step, muon_momentum, muon_eps);
-                    am_bout.update(&mut self.bout, &g_bout, lr, adam_step, muon_momentum, muon_eps);
+                    am_token_emb.update(
+                        &mut self.token_emb,
+                        &g_token_emb,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_pos_emb.update(
+                        &mut self.pos_emb,
+                        &g_pos_emb,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_wq.update(&mut self.wq, &g_wq, lr, adam_step, muon_momentum, muon_eps);
+                    am_wk.update(&mut self.wk, &g_wk, lr, adam_step, muon_momentum, muon_eps);
+                    am_wv.update(&mut self.wv, &g_wv, lr, adam_step, muon_momentum, muon_eps);
+                    am_wo.update(&mut self.wo, &g_wo, lr, adam_step, muon_momentum, muon_eps);
+                    am_wff1.update(
+                        &mut self.wff1,
+                        &g_wff1,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_bff1.update(
+                        &mut self.bff1,
+                        &g_bff1,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_wff2.update(
+                        &mut self.wff2,
+                        &g_wff2,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_bff2.update(
+                        &mut self.bff2,
+                        &g_bff2,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_ln1g.update(
+                        &mut self.ln1_gamma,
+                        &g_ln1g,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_ln1b.update(
+                        &mut self.ln1_beta,
+                        &g_ln1b,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_ln2g.update(
+                        &mut self.ln2_gamma,
+                        &g_ln2g,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_ln2b.update(
+                        &mut self.ln2_beta,
+                        &g_ln2b,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_wout.update(
+                        &mut self.wout,
+                        &g_wout,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
+                    am_bout.update(
+                        &mut self.bout,
+                        &g_bout,
+                        lr,
+                        adam_step,
+                        muon_momentum,
+                        muon_eps,
+                    );
 
                     // Zero accumulators
                     g_token_emb.iter_mut().for_each(|v| *v = 0.0);
@@ -683,8 +933,28 @@ impl ChatModel {
                 batch_start = batch_end;
             }
 
-            let avg_loss = total_loss / sample_count as f32;
-            println!("Epoch {}/{} avg loss: {:.6}", ep + 1, epochs, avg_loss);
+            let train_loss = total_loss / train_count as f32;
+            let mut val_total = 0.0f32;
+            for &start in val_starts {
+                let ctx_tokens = &data[start..start + t];
+                let target = data[start + t] as usize;
+                let h = self.forward_last_hidden(ctx_tokens);
+                let mut logits = vec![0.0f32; vocab];
+                matvec(&self.wout, &h, &mut logits, vocab, d);
+                for kk in 0..vocab {
+                    logits[kk] += self.bout[kk];
+                }
+                let probs = softmax(&logits);
+                val_total += -(probs[target] + 1e-12).ln();
+            }
+            let val_loss = val_total / val_starts.len().max(1) as f32;
+            println!(
+                "Epoch {}/{} train loss: {:.6}, val loss: {:.6}",
+                ep + 1,
+                epochs,
+                train_loss,
+                val_loss
+            );
         }
     }
 }
