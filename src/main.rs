@@ -18,6 +18,11 @@
 //   RINGTAIL_RETRIEVE_TOP_K  files retrieved per prompt (default: 4)
 //   RINGTAIL_RETRIEVE_CHARS  max chars per retrieved file snippet (default: 1200)
 //   RINGTAIL_SCAFFOLD_TOKENS generation tokens for /draft and /scaffold (default: 900)
+//   RINGTAIL_REPLY_TOKENS_MIN min generation tokens for normal chat (default: 24)
+//   RINGTAIL_REPLY_TOKENS_MAX max generation tokens for normal chat (default: 192)
+//   RINGTAIL_MAX_FILE_BYTES    max bytes to read per .txt file (default: 1_000_000)
+//   RINGTAIL_DATA_INCLUDE      optional comma-separated substrings a path must include
+//   RINGTAIL_DATA_EXCLUDE      optional comma-separated substrings a path must NOT include
 
 mod model;
 mod tokenizer;
@@ -25,8 +30,8 @@ mod tokenizer;
 use model::ChatModel;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -274,7 +279,40 @@ fn append_structure_tokens(text: &mut String, docs: &[CorpusDoc]) {
     text.push_str("</project_structure>\n");
 }
 
-fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusDoc>) {
+fn parse_csv_env(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn path_allowed(path: &Path, includes: &[String], excludes: &[String]) -> bool {
+    let p = path.to_string_lossy().to_lowercase();
+    if !includes.is_empty() && !includes.iter().any(|needle| p.contains(needle)) {
+        return false;
+    }
+    !excludes.iter().any(|needle| p.contains(needle))
+}
+
+fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let sample = &bytes[..bytes.len().min(4096)];
+    let bad = sample
+        .iter()
+        .filter(|&&b| b == 0 || (b < 0x09) || (b > 0x0D && b < 0x20))
+        .count();
+    bad * 100 / sample.len() > 5
+}
+
+fn load_corpus(
+    data_roots: &[PathBuf],
+    max_files: usize,
+    max_file_bytes: usize,
+) -> (String, Vec<CorpusDoc>) {
     let mut text = String::from(
         "hello there i am an offline chatbot created to demonstrate how a small neural network can learn patterns from text \
          i do not use the internet and i do not rely on external data everything i know is written inside this program \
@@ -287,6 +325,9 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
     );
 
     let mut seen = HashSet::new();
+    let mut seen_content = HashSet::new();
+    let includes = parse_csv_env("RINGTAIL_DATA_INCLUDE");
+    let excludes = parse_csv_env("RINGTAIL_DATA_EXCLUDE");
     let mut files = Vec::new();
     for root in data_roots {
         collect_txt_files(root, &mut files);
@@ -305,7 +346,25 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
             continue;
         }
 
-        if let Ok(contents) = fs::read_to_string(&canonical) {
+        if !path_allowed(&canonical, &includes, &excludes) {
+            continue;
+        }
+
+        if let Ok(raw) = fs::read(&canonical) {
+            if raw.is_empty() || looks_binary(&raw) {
+                continue;
+            }
+            let clipped = if raw.len() > max_file_bytes {
+                &raw[..max_file_bytes]
+            } else {
+                &raw
+            };
+            let contents = String::from_utf8_lossy(clipped).to_string();
+            let mut content_hasher = DefaultHasher::new();
+            contents.hash(&mut content_hasher);
+            if !seen_content.insert(content_hasher.finish()) {
+                continue;
+            }
             let tag = normalize_project_path(&canonical);
             let doc = CorpusDoc {
                 path: tag.clone(),
@@ -327,22 +386,11 @@ fn load_corpus(data_roots: &[PathBuf], max_files: usize) -> (String, Vec<CorpusD
     (text, docs)
 }
 
-fn build_structure_corpus(docs: &[CorpusDoc]) -> String {
-    let mut text = String::from("<file_structure_training>\n");
-    for doc in docs {
-        text.push_str("<path>");
-        text.push_str(&doc.path);
-        text.push_str("</path>\n");
-    }
-    text.push_str("</file_structure_training>\n");
-    text
-}
-
 fn corpus_fingerprint(docs: &[CorpusDoc]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for doc in docs {
         doc.path.hash(&mut hasher);
-        doc.content.len().hash(&mut hasher);
+        doc.content.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -368,6 +416,13 @@ fn parse_f32_env(name: &str, default: f32, min: f32) -> f32 {
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .filter(|v| *v >= min)
+        .unwrap_or(default)
+}
+
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(default)
 }
 
@@ -574,7 +629,8 @@ fn main() {
     let extracted_zip_sources = prepare_zip_sources(&mut data_roots);
 
     let max_files = parse_usize_env("RINGTAIL_MAX_FILES", 25_000, 1);
-    let (text, docs) = load_corpus(&data_roots, max_files);
+    let max_file_bytes = parse_usize_env("RINGTAIL_MAX_FILE_BYTES", 1_000_000, 1024);
+    let (text, docs) = load_corpus(&data_roots, max_files, max_file_bytes);
     let mut data = tokenizer::tokenize_bytes(&text);
 
     // ── hyperparameters ──────────────────────────────────────────────────────
@@ -585,6 +641,8 @@ fn main() {
     let retrieve_top_k = parse_usize_env("RINGTAIL_RETRIEVE_TOP_K", 4, 1);
     let retrieve_chars = parse_usize_env("RINGTAIL_RETRIEVE_CHARS", 1200, 64);
     let scaffold_tokens = parse_usize_env("RINGTAIL_SCAFFOLD_TOKENS", 900, 64);
+    let reply_tokens_min = parse_usize_env("RINGTAIL_REPLY_TOKENS_MIN", 24, 8);
+    let reply_tokens_max = parse_usize_env("RINGTAIL_REPLY_TOKENS_MAX", 192, reply_tokens_min);
 
     let mut epochs_if_loaded = 3usize;
     let mut epochs_if_fresh = 24usize;
@@ -658,10 +716,7 @@ fn main() {
     let current_fingerprint = corpus_fingerprint(&docs);
     let last_fingerprint = read_corpus_fingerprint(&weights_meta);
     let corpus_changed = last_fingerprint != Some(current_fingerprint);
-    let force_train = std::env::var("RINGTAIL_FORCE_TRAIN")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
+    let force_train = parse_bool_env("RINGTAIL_FORCE_TRAIN", false);
 
     let epochs = if loaded && !corpus_changed && !force_train {
         println!(
@@ -697,43 +752,6 @@ fn main() {
         write_corpus_fingerprint(&weights_meta, current_fingerprint);
     } else {
         println!("Warning: failed to save weights.");
-    }
-
-    // Structure-only weights are opt-in and disabled by default.
-    // For now we keep this model completely out of normal training/inference.
-    let enable_structure_model = std::env::var("RINGTAIL_ENABLE_STRUCTURE_MODEL")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-
-    if enable_structure_model {
-        let structure_text = build_structure_corpus(&docs);
-        let structure_data = tokenizer::tokenize_bytes(&structure_text);
-        if structure_data.len() > seq_len + 1 {
-            let weights_file_structure = "weightsfstrct.bin";
-            let mut structure_model = ChatModel::new(vocab, model_dim, seq_len);
-            let structure_loaded = structure_model.load_weights(weights_file_structure);
-            let structure_epochs = if structure_loaded { 1usize } else { epochs };
-            structure_model.train(
-                &structure_data,
-                structure_epochs,
-                learn_rate,
-                batch_size,
-                sample_stride,
-            );
-            if structure_model.save_weights(weights_file_structure) {
-                println!(
-                    "Saved structure-only weights to {}.",
-                    weights_file_structure
-                );
-            } else {
-                println!("Warning: failed to save structure-only weights.");
-            }
-        } else {
-            println!("Skipped structure-only training (not enough tokens).");
-        }
-    } else {
-        println!("Structure-only model disabled (RINGTAIL_ENABLE_STRUCTURE_MODEL not set).");
     }
 
     // ── chat loop ────────────────────────────────────────────────────────────
@@ -833,7 +851,7 @@ fn main() {
             ctx.push(0);
         }
 
-        let dynamic_tokens = ((line.len() / 8).clamp(18, 64)) as usize;
+        let dynamic_tokens = ((line.len() / 8).clamp(reply_tokens_min, reply_tokens_max)) as usize;
         let reply = model.generate(&ctx, dynamic_tokens, temperature, deterministic);
         println!("Bot: {}", reply);
     }
