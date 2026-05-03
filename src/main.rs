@@ -201,6 +201,73 @@ fn rezip_sources(extracted: &[ExtractedZip]) {
     }
 }
 
+#[derive(Debug)]
+struct ToolRunResult {
+    name: &'static str,
+    ok: bool,
+    status: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_tool_command(name: &'static str, args: &[&str]) -> ToolRunResult {
+    match Command::new("cargo").args(args).output() {
+        Ok(out) => ToolRunResult {
+            name,
+            ok: out.status.success(),
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        },
+        Err(e) => ToolRunResult {
+            name,
+            ok: false,
+            status: -1,
+            stdout: String::new(),
+            stderr: format!("failed to run cargo {}: {}", args.join(" "), e),
+        },
+    }
+}
+
+fn run_dev_loop(iterations: usize) {
+    println!("Bot: starting dev loop (max {} iteration(s))", iterations);
+    for i in 1..=iterations {
+        println!("Bot: iteration {}", i);
+        let steps = [
+            run_tool_command("fmt", &["fmt", "--all"]),
+            run_tool_command("check", &["check", "--all-targets"]),
+            run_tool_command("test", &["test", "--all-targets"]),
+            run_tool_command(
+                "clippy",
+                &["clippy", "--all-targets", "--", "-D", "warnings"],
+            ),
+        ];
+
+        let mut all_ok = true;
+        for step in &steps {
+            if step.ok {
+                println!("  ✅ {}", step.name);
+            } else {
+                all_ok = false;
+                println!("  ❌ {} (exit code: {})", step.name, step.status);
+                if !step.stdout.trim().is_empty() {
+                    println!("  stdout:\n{}", step.stdout);
+                }
+                if !step.stderr.trim().is_empty() {
+                    println!("  stderr:\n{}", step.stderr);
+                }
+                break;
+            }
+        }
+
+        if all_ok {
+            println!("Bot: dev loop is green.");
+            return;
+        }
+    }
+    println!("Bot: dev loop reached max iterations without going green.");
+}
+
 #[derive(Clone)]
 struct CorpusDoc {
     path: String,
@@ -797,6 +864,7 @@ fn main() {
     println!("  /det on|off        toggle deterministic mode");
     println!("  /draft <task>      generate project layout + files (text only)");
     println!("  /scaffold <task>   generate and write files to generated/");
+    println!("  /devloop [n]       run cargo fmt/check/test/clippy loop");
     println!("  quit               exit\n");
 
     let stdin = io::stdin();
@@ -844,6 +912,21 @@ fn main() {
         if line == "/det off" {
             deterministic = false;
             println!("Bot: deterministic mode OFF");
+            continue;
+        }
+
+        if line.starts_with("/devloop") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let iterations = if parts.len() > 1 {
+                parts[1]
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .unwrap_or(1)
+            } else {
+                1
+            };
+            run_dev_loop(iterations);
             continue;
         }
 
