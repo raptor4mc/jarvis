@@ -402,6 +402,14 @@ fn looks_binary(bytes: &[u8]) -> bool {
     bad * 100 / sample.len() > 5
 }
 
+fn looks_like_rust(contents: &str) -> bool {
+    let sample = &contents[..contents.len().min(2048)];
+    ["fn ", "let ", "impl ", "use ", "struct ", "enum ", "mod "]
+        .iter()
+        .filter(|&&kw| sample.contains(kw))
+        .count() >= 2
+}
+
 fn load_corpus(
     data_roots: &[PathBuf],
     max_files: usize,
@@ -454,6 +462,9 @@ fn load_corpus(
                 &raw
             };
             let contents = String::from_utf8_lossy(clipped).to_string();
+            if !looks_like_rust(&contents) {
+                continue;
+            }
             let mut content_hasher = DefaultHasher::new();
             contents.hash(&mut content_hasher);
             if !seen_content.insert(content_hasher.finish()) {

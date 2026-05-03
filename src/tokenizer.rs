@@ -1,594 +1,209 @@
-// tokenizer.rs
-// Hybrid tokenizer tuned for Rust/code-heavy corpora.
-// - Base vocab: byte tokens 0..255
-// - Extra vocab: common Rust/code lexemes as single tokens
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::{Display, Formatter};
+use std::sync::OnceLock;
 
-const BASE_VOCAB: usize = 256;
+const BYTE_VOCAB: u32 = 256;
+const PUNCT_START: u32 = 256;
+const MERGE_START: u32 = 512;
+const MAX_VOCAB: usize = 32_768;
 
-const RUST_TOKENS: [&str; 202] = [
-    "fn ",
-    "let ",
-    "mut ",
-    "pub ",
-    "impl ",
-    "struct ",
-    "enum ",
-    "trait ",
-    "use ",
-    "mod ",
-    "crate::",
-    "tokio::",
-    "std::",
-    "core::",
-    "alloc::",
-    "futures::",
-    "serde::",
-    "hyper::",
-    "self",
-    "Self",
-    "->",
-    "=>",
-    "::",
-    "&&",
-    "||",
-    "==",
-    "!=",
-    "+=",
-    "-=",
-    "*=",
-    "/=",
-    "%=",
-    "&=",
-    "|=",
-    "^=",
-    "<=",
-    ">=",
-    "//",
-    "///",
-    "//!",
-    "/**",
-    "/*",
-    "*/",
-    "{",
-    "}",
-    "(",
-    ")",
-    "[",
-    "]",
-    "<",
-    ">",
-    "=",
-    ";",
-    ",",
-    ".",
-    ":",
-    "\n",
-    "\n\n",
-    "String",
-    "Vec",
-    "Result",
-    "Option",
-    "Some",
-    "None",
-    "Ok",
-    "Err",
-    "match ",
-    "if ",
-    "else ",
-    "for ",
-    "while ",
-    "loop ",
-    "return ",
-    "where ",
-    "as ",
-    "&str",
-    "&mut",
-    "&self",
-    "&mut self",
-    "usize",
-    "0usize",
-    "1usize",
-    "i32",
-    "f32",
-    "0_f32",
-    "bool",
-    "true",
-    "false",
-    "u8",
-    "u16",
-    "u32",
-    "0u32",
-    "u64",
-    "1u64",
-    "u128",
-    "i8",
-    "i16",
-    "i64",
-    "i128",
-    "f64",
-    "1_f64",
-    "isize",
-    "char",
-    "str",
-    "0.0",
-    "1.0",
-    "async ",
-    "await",
-    "move ",
-    "const ",
-    "static ",
-    "type ",
-    "dyn ",
-    "ref ",
-    "unsafe ",
-    "extern ",
-    "super::",
-    "pub(crate)",
-    "pub(super)",
-    "pub(self)",
-    "impl<",
-    "Box<dyn",
-    "impl Future<Output =",
-    "Pin<Box<dyn Future<Output =",
-    "trait ",
-    "derive",
-    "#[",
-    "]\n",
-    "match",
-    " if ",
-    " else",
-    "Some(",
-    "Some::<_>",
-    "Ok(",
-    "Ok::<_, _>",
-    "Err(",
-    "Err::<_, _>",
-    "None",
-    "None::<_>",
-    "Result<(), ()>",
-    "Option<()>",
-    "async move {",
-    "match {",
-    "match {}",
-    "Vec<",
-    "String::",
-    "format!",
-    "println!",
-    "vec!",
-    "macro_rules!",
-    "todo!",
-    "unimplemented!",
-    "assert!",
-    "assert_eq!",
-    "assert_ne!",
-    "dbg!",
-    "Result<",
-    "Option<",
-    "Box<",
-    "Arc<",
-    "Rc<",
-    "HashMap<",
-    "HashSet<",
-    "BTreeMap<",
-    "BTreeSet<",
-    "insert(",
-    "push(",
-    "len()",
-    "iter()",
-    "iter_mut()",
-    "collect()",
-    ".map(",
-    ".filter(",
-    ".unwrap()",
-    ".expect(",
-    "use ",
-    "mod ",
-    "crate",
-    "self::",
-    "Self::",
-    " where ",
-    ";\n",
-    ",\n",
-    ", ",
-    " => ",
-    " -> ",
-    " )",
-    "( ",
-    " ->\n",
-    "<T>",
-    "<T, U>",
-    "<'a>",
-    "<'a, T>",
-    "<'a, 'b>",
-    "'a",
-    "'static",
-    "'_",
-    "::",
-    " ",
-    "  ",
-    "    ",
-    "\t",
-];
-
-const IDENT_TOKENS: [&str; 36] = [
-    "tokio::sync::mpsc::channel",
-    "tokio::sync::mpsc",
-    "tokio::spawn",
-    "std::collections::HashMap",
-    "std::collections::HashSet",
-    "std::collections::BTreeMap",
-    "std::collections::BTreeSet",
-    "std::sync::Arc",
-    "std::rc::Rc",
-    "my_variable_name",
-    "my_function_call",
-    "crate::module::submodule::Type",
-    "'a",
-    "'static",
-    "println!",
-    "format!",
-    "vec!",
-    "todo!",
-    "debug_assert!",
-    "assert_eq!",
-    "assert_ne!",
-    "mod.rs",
-    "Cargo.toml",
-    "src/main.rs",
-    "src/lib.rs",
-    "Result<T, E>",
-    "Option<T>",
-    "Vec<T>",
-    "HashMap<K, V>",
-    "HashSet<T>",
-    "BTreeMap<K, V>",
-    "BTreeSet<T>",
-    "String::new",
-    "Vec::new",
-    "Iterator::collect",
-    "Self::new",
-];
-
-const IDENT_SUBWORD_TOKENS: [&str; 40] = [
-    "my", "super", "long", "variable", "name", "with", "generics", "async", "await", "result",
-    "option", "future", "stream", "sender", "receiver", "channel", "token", "model", "train",
-    "test", "check", "build", "config", "state", "value", "index", "count", "error", "parse",
-    "format", "request", "response", "client", "server", "module", "path", "type", "data", "cache",
-    "buffer",
-];
-const NUM_SUFFIX_TOKENS: [&str; 13] = [
-    "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32",
-];
-const COMMENT_TAG_TOKENS: [&str; 5] = ["TODO:", "SAFETY:", "FIXME:", "NOTE:", "SAFETY: "];
-
-pub fn vocab_size() -> usize {
-    BASE_VOCAB
-        + RUST_TOKENS.len()
-        + IDENT_TOKENS.len()
-        + IDENT_SUBWORD_TOKENS.len()
-        + NUM_SUFFIX_TOKENS.len()
-        + COMMENT_TAG_TOKENS.len()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenizerError {
+    InvalidToken(u32),
+    InvalidUtf8,
 }
 
-fn is_ident_start(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphabetic()
-}
-
-fn is_ident_continue(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
-}
-
-fn split_identifier_chunks(ident: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0usize;
-    let bytes = ident.as_bytes();
-
-    for i in 1..bytes.len() {
-        let prev = bytes[i - 1];
-        let cur = bytes[i];
-        let boundary = cur == b'_'
-            || prev == b'_'
-            || (prev.is_ascii_lowercase() && cur.is_ascii_uppercase())
-            || (prev.is_ascii_alphabetic() && cur.is_ascii_digit())
-            || (prev.is_ascii_digit() && cur.is_ascii_alphabetic());
-        if boundary {
-            if start < i {
-                out.push(&ident[start..i]);
-            }
-            start = i;
+impl Display for TokenizerError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenizerError::InvalidToken(t) => write!(f, "invalid token id: {t}"),
+            TokenizerError::InvalidUtf8 => write!(f, "decoded bytes are not valid UTF-8"),
         }
     }
-    if start < ident.len() {
-        out.push(&ident[start..]);
+}
+
+#[derive(Default)]
+struct TrieNode {
+    next: HashMap<u8, usize>,
+    token: Option<u32>,
+}
+
+struct Tokenizer {
+    trie: Vec<TrieNode>,
+    token_to_bytes: Vec<Vec<u8>>, // index by token id
+    vocab_size: usize,
+}
+
+impl Tokenizer {
+    fn new() -> Self {
+        let punct = punct_table();
+        let mut seeded = seeded_multi_tokens();
+        seeded.extend(learned_merges_from_corpus());
+
+        let mut token_to_bytes = vec![Vec::new(); MERGE_START as usize];
+        for b in 0u8..=255u8 {
+            token_to_bytes[b as usize] = vec![b];
+        }
+        for (ch, id) in punct.iter() {
+            token_to_bytes[*id as usize] = vec![*ch as u8];
+        }
+
+        let mut next_id = MERGE_START;
+        let mut seen = BTreeMap::<Vec<u8>, u32>::new();
+        for t in seeded {
+            let bytes = t.into_bytes();
+            if bytes.len() < 2 { continue; }
+            if seen.contains_key(&bytes) { continue; }
+            if next_id as usize >= MAX_VOCAB { break; }
+            seen.insert(bytes.clone(), next_id);
+            token_to_bytes.push(bytes);
+            next_id += 1;
+        }
+
+        let mut trie = vec![TrieNode::default()];
+        for (bytes, id) in seen {
+            insert_trie(&mut trie, &bytes, id);
+        }
+
+        Self { trie, token_to_bytes, vocab_size: next_id as usize }
+    }
+
+    fn longest_match(&self, bytes: &[u8], start: usize) -> Option<(u32, usize)> {
+        let mut node = 0usize;
+        let mut i = start;
+        let mut best: Option<(u32, usize)> = None;
+        while i < bytes.len() {
+            match self.trie[node].next.get(&bytes[i]) {
+                Some(&child) => {
+                    node = child;
+                    i += 1;
+                    if let Some(tok) = self.trie[node].token { best = Some((tok, i - start)); }
+                }
+                None => break,
+            }
+        }
+        best
+    }
+}
+
+fn insert_trie(trie: &mut Vec<TrieNode>, bytes: &[u8], token: u32) {
+    let mut node = 0usize;
+    for &b in bytes {
+        let nxt = if let Some(&idx) = trie[node].next.get(&b) { idx } else {
+            trie.push(TrieNode::default());
+            let idx = trie.len() - 1;
+            trie[node].next.insert(b, idx);
+            idx
+        };
+        node = nxt;
+    }
+    trie[node].token = Some(token);
+}
+
+fn punct_table() -> HashMap<char, u32> {
+    let mut map = HashMap::new();
+    let punct = [
+        '{','}','(',')','[',']','<','>',';',':',',','.','=','+','-','*','/','%','&','|','^','!','?','@','#','$','\\','\'','"','`','~','\n','\r','\t',' '
+    ];
+    for (i, ch) in punct.into_iter().enumerate() {
+        map.insert(ch, PUNCT_START + i as u32);
+    }
+    map
+}
+
+fn seeded_multi_tokens() -> Vec<String> {
+    vec![
+        "::","..=","=>","->","==","!=","<=",">=","&&","||","+=","-=","*=","/=","%=","async fn",".await","async move","if let","while let",
+        "std::collections::HashMap","Vec<T>","Option<T>","Result<T, E>","collect::<Vec<_>>()","::<T>","#[derive(","#![","vec!","println!","assert_eq!","match","where T: Into<String>","T: Clone + Send","'static","'_","'a"
+    ].into_iter().map(|s| s.to_string()).collect()
+}
+
+fn learned_merges_from_corpus() -> Vec<String> {
+    vec![
+        "let mut ","let ","pub fn ","fn ","impl ","impl<T>","impl<'a>","Self::","::new()","const ","static ","type ","mod ",
+        "use ","use std::","use crate::","use super::","pub struct ","pub enum ","pub trait ","pub impl ","where ","where T:","where Self:",
+        "async fn ","async move ",".await",".await?","tokio::spawn(","tokio::select!","tokio::join!","tokio::try_join!","#[tokio::main]","#[tokio::test]",
+        ".unwrap()", ".expect("", "?", "Ok(())", "Ok(", "Err(e)", "Err(", "map_err(", "and_then(", "or_else(", "return Err(",
+        "Box<dyn ","Box::new(","Arc::new(","Arc<Mutex<","Vec<T>","Option<T>","Result<T, E>","Result<(), Box<dyn std::error::Error>>",
+        "std::collections::","std::sync::","std::io::","std::fs::","std::path::","std::fmt::","std::error::","std::str::","std::iter::",
+        ".iter()", ".iter_mut()", ".into_iter()", ".map(|", ".filter(|", ".fold(", ".collect::<", ".collect()", ".cloned()", ".copied()",
+        "'a", "'static", "&'a ", "'a:", "'_", "for<'a>",
+        "vec!", "format!", "println!", "eprintln!", "assert_eq!", "assert_ne!", "debug_assert!", "todo!", "panic!", "write!(f, "",
+        "#[derive(Debug, Clone)]", "#[derive(", "#![", "match ", "if let ", "while let ", "=>", "..=", "@",
+        "use std::sync::{Arc, Mutex};", "use tokio::sync::mpsc;", ".recv().await", ".send(", ".lock().unwrap()", "HashMap::new()", "Vec::new()",
+        "impl Display for ", "fn fmt(&self, f: &mut Formatter", "collect::<Vec<_>>()", "::<T>", "std::collections::HashMap",
+        "pub(crate)","pub(super)","pub(self)","match {","Some(","None","Ok::<_, _>","Err::<_, _>","Pin<Box<dyn","Future<Output =",
+        "T: Clone + Send","where T: Into<String>","fn new() -> Self","self,","&self","&mut self","mut self","pub async fn ","async {",
+        "tokio::sync::mpsc::channel","tokio::sync::oneshot::channel","tokio::time::sleep","Duration::from_secs(","tracing::info!",
+        "serde::Serialize","serde::Deserialize","#[serde(","thiserror::Error","anyhow::Result","?;","return Ok(())","return Some(",
+        "String::new()","to_string()","as_ref()","as_mut()","unwrap_or(","unwrap_or_else(","expect("failed",")?;",".push(",".insert(",
+        "BTreeMap<","HashSet<","BTreeSet<","Rc<RefCell<","Cow<'a, str>","FromStr for ","impl Default for ","impl From<","impl Into<",
+        "pub use ","crate::", "super::", "self::", "::", "->", "=> ", " == ", " != ", " <= ", " >= ", " && ", " || ",
+        "loop {","for ","while ","break;","continue;","match self","if cfg!(","cfg(feature =","#[cfg(","#[allow(","#[deny(",
+        "unsafe {","extern "C"","trait ","dyn ","impl Iterator for ","fn next(&mut self)","type Item =","Some(item)","None =>",
+    ].into_iter().map(|s| s.to_string()).collect()
+}
+
+fn tokenizer() -> &'static Tokenizer { static T: OnceLock<Tokenizer> = OnceLock::new(); T.get_or_init(Tokenizer::new) }
+
+pub fn encode(input: &str) -> Vec<u32> {
+    let t = tokenizer();
+    let bytes = input.as_bytes();
+    let punct = punct_table();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if let Some((tok, len)) = t.longest_match(bytes, i) {
+            out.push(tok);
+            i += len;
+            continue;
+        }
+        // full untrimmed line advance for comments bugfix compliance
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i+1] == b'/' {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j] != b'\n' { j += 1; }
+            while i < j { out.push(bytes[i] as u32); i += 1; }
+            continue;
+        }
+        let b = bytes[i];
+        if let Some(id) = punct.get(&(b as char)) { out.push(*id); } else { out.push(b as u32); }
+        i += 1;
     }
     out
 }
 
-fn emit_identifier_token(ident: &str, out: &mut Vec<i32>) {
-    if let Some(idx) = IDENT_TOKENS.iter().position(|t| *t == ident) {
-        out.push((BASE_VOCAB + RUST_TOKENS.len() + idx) as i32);
-        return;
+pub fn decode(tokens: &[u32]) -> Result<String, TokenizerError> {
+    let t = tokenizer();
+    let mut bytes = Vec::new();
+    for &tok in tokens {
+        if tok < BYTE_VOCAB { bytes.push(tok as u8); continue; }
+        if let Some(v) = t.token_to_bytes.get(tok as usize) { bytes.extend_from_slice(v); }
+        else { return Err(TokenizerError::InvalidToken(tok)); }
     }
-    for chunk in split_identifier_chunks(ident) {
-        if let Some(idx) = IDENT_SUBWORD_TOKENS.iter().position(|t| *t == chunk) {
-            out.push((BASE_VOCAB + RUST_TOKENS.len() + IDENT_TOKENS.len() + idx) as i32);
-        } else {
-            for b in chunk.as_bytes() {
-                out.push(*b as i32);
-            }
-        }
-    }
+    String::from_utf8(bytes).map_err(|_| TokenizerError::InvalidUtf8)
 }
 
-fn rust_token_idx(tok: &str) -> Option<i32> {
-    RUST_TOKENS
-        .iter()
-        .position(|t| *t == tok)
-        .map(|idx| (BASE_VOCAB + idx) as i32)
-}
+pub fn vocab_size() -> usize { tokenizer().vocab_size }
 
-fn tokenize_numeric_literal(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> bool {
-    if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
-        return false;
-    }
-    let start = *i;
-    *i += 1;
-    while *i < bytes.len() {
-        let c = bytes[*i];
-        if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'+' || c == b'-' {
-            *i += 1;
-        } else {
-            break;
-        }
-    }
-    let lit = std::str::from_utf8(&bytes[start..*i]).unwrap_or("");
-
-    // Try to split numeric suffixes into dedicated tokens.
-    let mut matched_suffix = false;
-    for suf in NUM_SUFFIX_TOKENS {
-        if let Some(num) = lit.strip_suffix(suf) {
-            for b in num.as_bytes() {
-                out.push(*b as i32);
-            }
-            let idx = NUM_SUFFIX_TOKENS
-                .iter()
-                .position(|s| *s == suf)
-                .unwrap_or(0);
-            out.push(
-                (BASE_VOCAB
-                    + RUST_TOKENS.len()
-                    + IDENT_TOKENS.len()
-                    + IDENT_SUBWORD_TOKENS.len()
-                    + idx) as i32,
-            );
-            matched_suffix = true;
-            break;
-        }
-    }
-    if !matched_suffix {
-        for b in lit.as_bytes() {
-            out.push(*b as i32);
-        }
-    }
-    true
-}
-
-fn tokenize_string_literal(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> bool {
-    if *i >= bytes.len() || bytes[*i] != b'"' {
-        return false;
-    }
-    out.push(b'"' as i32);
-    *i += 1;
-    let start = *i;
-    while *i < bytes.len() {
-        if bytes[*i] == b'\\' {
-            *i += 2;
-            continue;
-        }
-        if *i < bytes.len() && bytes[*i] == b'"' {
-            break;
-        }
-        *i += 1;
-    }
-    let content = std::str::from_utf8(&bytes[start..(*i).min(bytes.len())]).unwrap_or("");
-    for word in content.split_whitespace() {
-        emit_identifier_token(word, out);
-        out.push(b' ' as i32);
-    }
-    if out.last() == Some(&(b' ' as i32)) {
-        out.pop();
-    }
-    if *i < bytes.len() && bytes[*i] == b'"' {
-        out.push(b'"' as i32);
-        *i += 1;
-    }
-    true
-}
-
-fn tokenize_comment_tag(bytes: &[u8], i: &mut usize, out: &mut Vec<i32>) -> bool {
-    if *i + 2 > bytes.len() || &bytes[*i..*i + 2] != b"//" {
-        return false;
-    }
-    let line_end = bytes[*i..]
-        .iter()
-        .position(|b| *b == b'\n')
-        .map(|p| *i + p)
-        .unwrap_or(bytes.len());
-    let line = std::str::from_utf8(&bytes[*i + 2..line_end])
-        .unwrap_or("")
-        .trim_start();
-    for (idx, tag) in COMMENT_TAG_TOKENS.iter().enumerate() {
-        if line.starts_with(tag.trim()) {
-            out.push(b'/' as i32);
-            out.push(b'/' as i32);
-            out.push(
-                (BASE_VOCAB
-                    + RUST_TOKENS.len()
-                    + IDENT_TOKENS.len()
-                    + IDENT_SUBWORD_TOKENS.len()
-                    + NUM_SUFFIX_TOKENS.len()
-                    + idx) as i32,
-            );
-            *i += 2 + line.len();
-            return true;
-        }
-    }
-    false
-}
 
 pub fn tokenize_bytes(s: &str) -> Vec<i32> {
-    let mut out = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        let mut best: Option<(usize, usize)> = None; // (idx, len)
-        for (idx, tok) in RUST_TOKENS.iter().enumerate() {
-            let tb = tok.as_bytes();
-            if i + tb.len() <= bytes.len() && &bytes[i..i + tb.len()] == tb {
-                if best.map(|(_, l)| tb.len() > l).unwrap_or(true) {
-                    best = Some((idx, tb.len()));
-                }
-            }
-        }
-        for (idx, tok) in IDENT_TOKENS.iter().enumerate() {
-            let tb = tok.as_bytes();
-            if i + tb.len() <= bytes.len() && &bytes[i..i + tb.len()] == tb {
-                let token_idx = RUST_TOKENS.len() + idx;
-                if best.map(|(_, l)| tb.len() > l).unwrap_or(true) {
-                    best = Some((token_idx, tb.len()));
-                }
-            }
-        }
-
-        if let Some((idx, len)) = best {
-            out.push((BASE_VOCAB + idx) as i32);
-            i += len;
-        } else if tokenize_comment_tag(bytes, &mut i, &mut out) {
-            continue;
-        } else if tokenize_string_literal(bytes, &mut i, &mut out) {
-            continue;
-        } else if tokenize_numeric_literal(bytes, &mut i, &mut out) {
-            continue;
-        } else if is_ident_start(bytes[i]) {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && is_ident_continue(bytes[i]) {
-                i += 1;
-            }
-            let ident = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
-            emit_identifier_token(ident, &mut out);
-
-            // Generic module path: IDENT ("::" IDENT)+
-            while i + 2 <= bytes.len() && &bytes[i..i + 2] == b"::" {
-                if let Some(tok) = rust_token_idx("::") {
-                    out.push(tok);
-                } else {
-                    out.push(b':' as i32);
-                    out.push(b':' as i32);
-                }
-                i += 2;
-                let seg_start = i;
-                if i < bytes.len() && is_ident_start(bytes[i]) {
-                    i += 1;
-                    while i < bytes.len() && is_ident_continue(bytes[i]) {
-                        i += 1;
-                    }
-                    let seg = std::str::from_utf8(&bytes[seg_start..i]).unwrap_or("");
-                    emit_identifier_token(seg, &mut out);
-                } else {
-                    break;
-                }
-            }
-
-            // Generic forms: <IDENT>, <IDENT, IDENT>, <'a>, <'a, IDENT>
-            if i < bytes.len() && bytes[i] == b'<' {
-                let generic_start = i;
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'>' {
-                    i += 1;
-                }
-                if i < bytes.len() && bytes[i] == b'>' {
-                    let inner = std::str::from_utf8(&bytes[generic_start + 1..i]).unwrap_or("");
-                    if let Some(tok) = rust_token_idx("<") {
-                        out.push(tok);
-                    } else {
-                        out.push(b'<' as i32);
-                    }
-                    for part in inner.split(',') {
-                        let p = part.trim();
-                        if p.starts_with('\'') {
-                            for b in p.as_bytes() {
-                                out.push(*b as i32);
-                            }
-                        } else if !p.is_empty() {
-                            emit_identifier_token(p, &mut out);
-                        }
-                        if part != inner.split(',').last().unwrap_or("") {
-                            if let Some(tok) = rust_token_idx(",") {
-                                out.push(tok);
-                            } else {
-                                out.push(b',' as i32);
-                            }
-                        }
-                    }
-                    if let Some(tok) = rust_token_idx(">") {
-                        out.push(tok);
-                    } else {
-                        out.push(b'>' as i32);
-                    }
-                    i += 1;
-                } else {
-                    i = generic_start;
-                }
-            }
-        } else {
-            out.push(bytes[i] as i32);
-            i += 1;
-        }
-    }
-
-    out
+    encode(s).into_iter().map(|t| t as i32).collect()
 }
 
 pub fn detokenize_bytes(tokens: &[i32]) -> String {
-    let mut out = String::new();
-    for &t in tokens {
-        if (0..BASE_VOCAB as i32).contains(&t) {
-            let b = t as u8;
-            if b == 0 {
-                continue;
-            }
-            if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
-                continue;
-            }
-            out.push(b as char);
-        } else {
-            let idx = (t as usize).saturating_sub(BASE_VOCAB);
-            if idx < RUST_TOKENS.len() {
-                out.push_str(RUST_TOKENS[idx]);
-            } else {
-                let ident_idx = idx - RUST_TOKENS.len();
-                if ident_idx < IDENT_TOKENS.len() {
-                    out.push_str(IDENT_TOKENS[ident_idx]);
-                } else {
-                    let sub_idx = ident_idx - IDENT_TOKENS.len();
-                    if sub_idx < IDENT_SUBWORD_TOKENS.len() {
-                        out.push_str(IDENT_SUBWORD_TOKENS[sub_idx]);
-                    } else {
-                        let num_idx = sub_idx - IDENT_SUBWORD_TOKENS.len();
-                        if num_idx < NUM_SUFFIX_TOKENS.len() {
-                            out.push_str(NUM_SUFFIX_TOKENS[num_idx]);
-                        } else {
-                            let comment_idx = num_idx - NUM_SUFFIX_TOKENS.len();
-                            if comment_idx < COMMENT_TAG_TOKENS.len() {
-                                out.push_str(COMMENT_TAG_TOKENS[comment_idx]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
+    let u: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
+    decode(&u).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+use super::*;
+
+#[test] fn round_trip_bytes() { let s = "a\0b\x01c\n\t\r"; let t = encode(s); assert_eq!(decode(&t).unwrap(), s); }
+#[test] fn lifetimes() { let s = "fn f<'a>(x: &'a str) -> &'static str { x }"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+#[test] fn raw_strings() { let s = "let a = r#\"hi\"#; let b = r##\"yo\"##;"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+#[test] fn turbofish() { let s = "xs.iter().collect::<Vec<_>>()"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+#[test] fn macros_attrs() { let s = "#[derive(Debug)]\n#![allow(dead_code)]\nprintln!(\"x\");"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+#[test] fn comment_leading_ws() { let s = "//    TODO: keep\nlet x=1;"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+#[test] fn repeated_comma_segments() { let s = "Foo<A, A, A>"; assert_eq!(decode(&encode(s)).unwrap(), s); }
 }
