@@ -434,6 +434,36 @@ fn query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
+fn char_trigrams(s: &str) -> HashSet<String> {
+    let compact: String = s
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || c.is_ascii_whitespace() || *c == '_')
+        .collect();
+    let chars: Vec<char> = compact.chars().collect();
+    if chars.len() < 3 {
+        return HashSet::new();
+    }
+    let mut grams = HashSet::new();
+    for i in 0..=chars.len() - 3 {
+        grams.insert(chars[i..i + 3].iter().collect());
+    }
+    grams
+}
+
+fn jaccard_score(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count() as f32;
+    let union = a.union(b).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
 fn build_prompt_with_retrieval(
     user_input: &str,
     docs: &[CorpusDoc],
@@ -449,16 +479,21 @@ fn build_prompt_with_retrieval(
         return user_input.to_string();
     }
 
-    let mut scored: Vec<(usize, usize)> = docs
+    let query_grams = char_trigrams(user_input);
+    let mut scored: Vec<(usize, f32)> = docs
         .iter()
         .enumerate()
         .filter_map(|(i, doc)| {
             let path_lc = doc.path.to_lowercase();
-            let score = terms
+            let lexical = terms
                 .iter()
                 .map(|t| doc.content_lc.matches(t).count() + path_lc.matches(t).count() * 2)
                 .sum::<usize>();
-            if score > 0 {
+            let snippet: String = doc.content_lc.chars().take(max_chars.max(64)).collect();
+            let grams = char_trigrams(&(doc.path.clone() + " " + &snippet));
+            let semantic = jaccard_score(&query_grams, &grams);
+            let score = lexical as f32 + (semantic * 25.0);
+            if score > 0.0 {
                 Some((i, score))
             } else {
                 None
@@ -470,7 +505,7 @@ fn build_prompt_with_retrieval(
         return user_input.to_string();
     }
 
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut prompt = String::new();
     prompt.push_str("<retrieved_context>\n");
@@ -480,7 +515,7 @@ fn build_prompt_with_retrieval(
         prompt.push_str("<context_file path=\"");
         prompt.push_str(&doc.path);
         prompt.push_str("\" score=\"");
-        prompt.push_str(&score.to_string());
+        prompt.push_str(&format!("{:.3}", score));
         prompt.push_str("\">\n");
         prompt.push_str(&snippet);
         prompt.push_str("\n</context_file>\n");
@@ -495,7 +530,7 @@ fn build_prompt_with_retrieval(
 fn build_scaffold_prompt(task: &str, docs: &[CorpusDoc], top_k: usize, max_chars: usize) -> String {
     let mut prompt = String::new();
     prompt.push_str(
-        "You are ferris, a rust project generator. Output ONLY this format:\n[[DIR:path]]\n[[FILE:path]]\n<rust code or text>\n[[END_FILE]]\nUse sensible module/file names and compile-oriented Rust project layout.\n",
+        "You are ferris, a Rust coding agent. Output ONLY this format:\n[[DIR:path]]\n[[FILE:path]]\n<rust code or text>\n[[END_FILE]]\nAlways generate compiling Rust code with Cargo.toml, src/main.rs or src/lib.rs, and required modules.\n",
     );
     prompt.push_str("Task:\n");
     prompt.push_str(task);
