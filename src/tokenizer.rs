@@ -5,7 +5,7 @@
 
 const BASE_VOCAB: usize = 256;
 
-const RUST_TOKENS: [&str; 165] = [
+const RUST_TOKENS: [&str; 182] = [
     "fn ",
     "let ",
     "mut ",
@@ -17,6 +17,13 @@ const RUST_TOKENS: [&str; 165] = [
     "use ",
     "mod ",
     "crate::",
+    "tokio::",
+    "std::",
+    "core::",
+    "alloc::",
+    "futures::",
+    "serde::",
+    "hyper::",
     "self",
     "Self",
     "->",
@@ -72,6 +79,9 @@ const RUST_TOKENS: [&str; 165] = [
     "where ",
     "as ",
     "&str",
+    "&mut",
+    "&self",
+    "&mut self",
     "usize",
     "i32",
     "f32",
@@ -106,6 +116,9 @@ const RUST_TOKENS: [&str; 165] = [
     "pub(super)",
     "pub(self)",
     "impl<",
+    "Box<dyn",
+    "impl Future<Output =",
+    "Pin<Box<dyn Future<Output =",
     "trait ",
     "derive",
     "#[",
@@ -166,6 +179,10 @@ const RUST_TOKENS: [&str; 165] = [
     "<T, U>",
     "<'a>",
     "<'a, T>",
+    "<'a, 'b>",
+    "'a",
+    "'static",
+    "'_",
     "::",
     " ",
     "  ",
