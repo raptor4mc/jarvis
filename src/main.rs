@@ -665,23 +665,33 @@ fn build_prompt_with_retrieval(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut prompt = String::new();
-    prompt.push_str("<retrieved_context>\n");
+    prompt.push_str(
+        "You are Ferris, a Rust coding agent. Focus on Rust code correctness and debugging.\n\
+Use retrieved context as hints, but do not copy XML-like tags.\n\
+When fixing Rust code, respond in this exact format:\n\
+Issue: <short problem>\n\
+Fixed code:\n\
+```rust\n\
+<corrected code>\n\
+```\n\
+Why: <1-3 short bullets>\n\n",
+    );
+    prompt.push_str("Retrieved snippets:\n");
     for (idx, score) in scored.into_iter().take(top_k.max(1)) {
         let ch = &all_chunks[idx];
-        prompt.push_str("<context_file path=\"");
+        prompt.push_str("- path: ");
         prompt.push_str(&ch.path);
-        prompt.push_str("\" boundary=\"");
+        prompt.push_str(" | boundary: ");
         prompt.push_str(&ch.boundary);
-        prompt.push_str("\" score=\"");
+        prompt.push_str(" | score: ");
         prompt.push_str(&format!("{:.3}", score));
-        prompt.push_str("\">\n");
+        prompt.push_str("\n");
         prompt.push_str(&ch.content);
-        prompt.push_str("\n</context_file>\n");
+        prompt.push_str("\n---\n");
     }
-    prompt.push_str("</retrieved_context>\n");
-    prompt.push_str("<user_prompt>\n");
+    prompt.push_str("User request:\n");
     prompt.push_str(user_input);
-    prompt.push_str("\n</user_prompt>");
+    prompt.push_str("\nAnswer as the Rust coding agent now.");
     prompt
 }
 
