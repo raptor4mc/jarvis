@@ -23,6 +23,7 @@
 //   RINGTAIL_MAX_FILE_BYTES    max bytes to read per .txt file (default: 1_000_000)
 //   RINGTAIL_DATA_INCLUDE      optional comma-separated substrings a path must include
 //   RINGTAIL_DATA_EXCLUDE      optional comma-separated substrings a path must NOT include
+//   RINGTAIL_BASE_MODEL_CMD    optional command for stronger inference engine (reads $RINGTAIL_PROMPT)
 
 mod model;
 mod tokenizer;
@@ -266,6 +267,32 @@ fn run_dev_loop(iterations: usize) {
         }
     }
     println!("Bot: dev loop reached max iterations without going green.");
+}
+
+fn run_foundation_model(prompt: &str) -> Option<String> {
+    let cmd = std::env::var("RINGTAIL_BASE_MODEL_CMD").ok()?;
+    if cmd.trim().is_empty() {
+        return None;
+    }
+    let out = Command::new("sh")
+        .arg("-lc")
+        .arg(cmd)
+        .env("RINGTAIL_PROMPT", prompt)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        eprintln!(
+            "Warning: foundation model command failed with status {:?}",
+            out.status.code()
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 #[derive(Clone)]
@@ -932,22 +959,26 @@ fn main() {
 
         if let Some(task) = line.strip_prefix("/draft ") {
             let prompt = build_scaffold_prompt(task.trim(), &docs, retrieve_top_k, retrieve_chars);
-            let mut ctx = tokenizer::tokenize_bytes(&prompt);
-            if ctx.is_empty() {
-                ctx.push(0);
-            }
-            let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
+            let draft = run_foundation_model(&prompt).unwrap_or_else(|| {
+                let mut ctx = tokenizer::tokenize_bytes(&prompt);
+                if ctx.is_empty() {
+                    ctx.push(0);
+                }
+                model.generate(&ctx, scaffold_tokens, temperature, deterministic)
+            });
             println!("Bot draft:\n{}", draft);
             continue;
         }
 
         if let Some(task) = line.strip_prefix("/scaffold ") {
             let prompt = build_scaffold_prompt(task.trim(), &docs, retrieve_top_k, retrieve_chars);
-            let mut ctx = tokenizer::tokenize_bytes(&prompt);
-            if ctx.is_empty() {
-                ctx.push(0);
-            }
-            let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
+            let draft = run_foundation_model(&prompt).unwrap_or_else(|| {
+                let mut ctx = tokenizer::tokenize_bytes(&prompt);
+                if ctx.is_empty() {
+                    ctx.push(0);
+                }
+                model.generate(&ctx, scaffold_tokens, temperature, deterministic)
+            });
             match apply_scaffold(&draft, Path::new("generated")) {
                 Ok((d, f, skipped)) => {
                     println!(
@@ -964,13 +995,16 @@ fn main() {
 
         // Generate reply with retrieval context from .txt corpus on every prompt.
         let prompt = build_prompt_with_retrieval(&line, &docs, retrieve_top_k, retrieve_chars);
-        let mut ctx = tokenizer::tokenize_bytes(&prompt);
-        if ctx.is_empty() {
-            ctx.push(0);
-        }
+        let reply = run_foundation_model(&prompt).unwrap_or_else(|| {
+            let mut ctx = tokenizer::tokenize_bytes(&prompt);
+            if ctx.is_empty() {
+                ctx.push(0);
+            }
 
-        let dynamic_tokens = ((line.len() / 8).clamp(reply_tokens_min, reply_tokens_max)) as usize;
-        let reply = model.generate(&ctx, dynamic_tokens, temperature, deterministic);
+            let dynamic_tokens =
+                ((line.len() / 8).clamp(reply_tokens_min, reply_tokens_max)) as usize;
+            model.generate(&ctx, dynamic_tokens, temperature, deterministic)
+        });
         println!("Bot: {}", reply);
     }
 }
