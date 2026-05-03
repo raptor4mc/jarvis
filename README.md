@@ -5,6 +5,7 @@ Ferris is an offline Rust-focused chatbot + scaffold assistant that trains on lo
 ## What it does
 - Trains a small local model on text corpora under configured roots.
 - Retrieves matching snippets from corpus files at prompt time.
+- Uses hybrid retrieval (keyword frequency + lightweight trigram similarity) for better code-context matching.
 - Supports `/draft` and `/scaffold` commands to generate Rust-oriented project layouts.
 
 ## Data format
@@ -33,3 +34,4 @@ Recommended corpus shape:
 - `.txt`-only ingestion (no direct `.rs` parser).
 - Single-head architecture and CPU-oriented training loop.
 - Retrieval is keyword-match based, not embedding/vector DB based.
+- Retrieval is improved but still not full embedding/vector DB semantic search.

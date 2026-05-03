@@ -8,7 +8,6 @@
 //   - Adam optimizer
 //   - Weight save / load (binary, same format as C++ version)
 
-use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -317,7 +316,7 @@ impl ChatModel {
         let (d, t) = (self.d, self.t);
 
         // Embedding lookup: x[t] = token_emb[tok] + pos_emb[t]
-        let mut x: Vec<Vec<f32>> = (0..t)
+        let x: Vec<Vec<f32>> = (0..t)
             .map(|i| {
                 let tok = ctx[i] as usize;
                 (0..d)
@@ -648,7 +647,7 @@ impl ChatModel {
 
                     // FFN backward
                     let mut dh1 = dpre2.clone();
-                    let mut dff2_grad = dpre2.clone();
+                    let dff2_grad = dpre2.clone();
                     let mut dff_act = vec![0.0f32; ff];
                     for i in 0..d {
                         g_bff2[i] += dff2_grad[i];
