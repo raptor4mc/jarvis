@@ -3,12 +3,23 @@ name = "ringtail_ai"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "ringtail_ai"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ringtail_ai"
 path = "src/main.rs"
 
 [dependencies]
 rayon = "1.10"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "tokenizer_bench"
+harness = false
 
 [profile.release]
 opt-level = 3

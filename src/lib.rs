@@ -119,29 +119,19 @@ fn seeded_multi_tokens() -> Vec<String> {
 }
 
 fn learned_merges_from_corpus() -> Vec<String> {
-    vec![
-        "let mut ","let ","pub fn ","fn ","impl ","impl<T>","impl<'a>","Self::","::new()","const ","static ","type ","mod ",
-        "use ","use std::","use crate::","use super::","pub struct ","pub enum ","pub trait ","pub impl ","where ","where T:","where Self:",
-        "async fn ","async move ",".await",".await?","tokio::spawn(","tokio::select!","tokio::join!","tokio::try_join!","#[tokio::main]","#[tokio::test]",
-        ".unwrap()", ".expect("", "?", "Ok(())", "Ok(", "Err(e)", "Err(", "map_err(", "and_then(", "or_else(", "return Err(",
-        "Box<dyn ","Box::new(","Arc::new(","Arc<Mutex<","Vec<T>","Option<T>","Result<T, E>","Result<(), Box<dyn std::error::Error>>",
-        "std::collections::","std::sync::","std::io::","std::fs::","std::path::","std::fmt::","std::error::","std::str::","std::iter::",
-        ".iter()", ".iter_mut()", ".into_iter()", ".map(|", ".filter(|", ".fold(", ".collect::<", ".collect()", ".cloned()", ".copied()",
-        "'a", "'static", "&'a ", "'a:", "'_", "for<'a>",
-        "vec!", "format!", "println!", "eprintln!", "assert_eq!", "assert_ne!", "debug_assert!", "todo!", "panic!", "write!(f, "",
-        "#[derive(Debug, Clone)]", "#[derive(", "#![", "match ", "if let ", "while let ", "=>", "..=", "@",
-        "use std::sync::{Arc, Mutex};", "use tokio::sync::mpsc;", ".recv().await", ".send(", ".lock().unwrap()", "HashMap::new()", "Vec::new()",
-        "impl Display for ", "fn fmt(&self, f: &mut Formatter", "collect::<Vec<_>>()", "::<T>", "std::collections::HashMap",
-        "pub(crate)","pub(super)","pub(self)","match {","Some(","None","Ok::<_, _>","Err::<_, _>","Pin<Box<dyn","Future<Output =",
-        "T: Clone + Send","where T: Into<String>","fn new() -> Self","self,","&self","&mut self","mut self","pub async fn ","async {",
-        "tokio::sync::mpsc::channel","tokio::sync::oneshot::channel","tokio::time::sleep","Duration::from_secs(","tracing::info!",
-        "serde::Serialize","serde::Deserialize","#[serde(","thiserror::Error","anyhow::Result","?;","return Ok(())","return Some(",
-        "String::new()","to_string()","as_ref()","as_mut()","unwrap_or(","unwrap_or_else(","expect("failed",")?;",".push(",".insert(",
-        "BTreeMap<","HashSet<","BTreeSet<","Rc<RefCell<","Cow<'a, str>","FromStr for ","impl Default for ","impl From<","impl Into<",
-        "pub use ","crate::", "super::", "self::", "::", "->", "=> ", " == ", " != ", " <= ", " >= ", " && ", " || ",
-        "loop {","for ","while ","break;","continue;","match self","if cfg!(","cfg(feature =","#[cfg(","#[allow(","#[deny(",
-        "unsafe {","extern "C"","trait ","dyn ","impl Iterator for ","fn next(&mut self)","type Item =","Some(item)","None =>",
-    ].into_iter().map(|s| s.to_string()).collect()
+    let sample = include_str!("../README.md");
+    let mut freq: HashMap<String, usize> = HashMap::new();
+    for n in 2..=8 {
+        for w in sample.as_bytes().windows(n) {
+            if w.iter().all(|b| b.is_ascii_alphanumeric() || b"_<>:!?.=+-/()[]{} ,'\"".contains(b)) {
+                let s = String::from_utf8_lossy(w).to_string();
+                *freq.entry(s).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut v: Vec<(String, usize)> = freq.into_iter().filter(|(_, c)| *c > 2).collect();
+    v.sort_by(|a,b| b.1.cmp(&a.1).then_with(|| b.0.len().cmp(&a.0.len())));
+    v.into_iter().take(6000).map(|(s,_)| s).collect()
 }
 
 fn tokenizer() -> &'static Tokenizer { static T: OnceLock<Tokenizer> = OnceLock::new(); T.get_or_init(Tokenizer::new) }
@@ -184,16 +174,6 @@ pub fn decode(tokens: &[u32]) -> Result<String, TokenizerError> {
 }
 
 pub fn vocab_size() -> usize { tokenizer().vocab_size }
-
-
-pub fn tokenize_bytes(s: &str) -> Vec<i32> {
-    encode(s).into_iter().map(|t| t as i32).collect()
-}
-
-pub fn detokenize_bytes(tokens: &[i32]) -> String {
-    let u: Vec<u32> = tokens.iter().map(|&t| t as u32).collect();
-    decode(&u).unwrap_or_default()
-}
 
 #[cfg(test)]
 mod tests {
