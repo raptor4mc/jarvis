@@ -23,6 +23,7 @@
 //   RINGTAIL_MAX_FILE_BYTES    max bytes to read per .txt file (default: 1_000_000)
 //   RINGTAIL_DATA_INCLUDE      optional comma-separated substrings a path must include
 //   RINGTAIL_DATA_EXCLUDE      optional comma-separated substrings a path must NOT include
+//   RINGTAIL_BASE_MODEL_CMD    optional command for stronger inference engine (reads $RINGTAIL_PROMPT)
 
 mod model;
 mod tokenizer;
@@ -198,6 +199,99 @@ fn rezip_sources(extracted: &[ExtractedZip]) {
                 e
             ),
         }
+    }
+}
+
+#[derive(Debug)]
+struct ToolRunResult {
+    name: &'static str,
+    ok: bool,
+    status: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_tool_command(name: &'static str, args: &[&str]) -> ToolRunResult {
+    match Command::new("cargo").args(args).output() {
+        Ok(out) => ToolRunResult {
+            name,
+            ok: out.status.success(),
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        },
+        Err(e) => ToolRunResult {
+            name,
+            ok: false,
+            status: -1,
+            stdout: String::new(),
+            stderr: format!("failed to run cargo {}: {}", args.join(" "), e),
+        },
+    }
+}
+
+fn run_dev_loop(iterations: usize) {
+    println!("Bot: starting dev loop (max {} iteration(s))", iterations);
+    for i in 1..=iterations {
+        println!("Bot: iteration {}", i);
+        let steps = [
+            run_tool_command("fmt", &["fmt", "--all"]),
+            run_tool_command("check", &["check", "--all-targets"]),
+            run_tool_command("test", &["test", "--all-targets"]),
+            run_tool_command(
+                "clippy",
+                &["clippy", "--all-targets", "--", "-D", "warnings"],
+            ),
+        ];
+
+        let mut all_ok = true;
+        for step in &steps {
+            if step.ok {
+                println!("  ✅ {}", step.name);
+            } else {
+                all_ok = false;
+                println!("  ❌ {} (exit code: {})", step.name, step.status);
+                if !step.stdout.trim().is_empty() {
+                    println!("  stdout:\n{}", step.stdout);
+                }
+                if !step.stderr.trim().is_empty() {
+                    println!("  stderr:\n{}", step.stderr);
+                }
+                break;
+            }
+        }
+
+        if all_ok {
+            println!("Bot: dev loop is green.");
+            return;
+        }
+    }
+    println!("Bot: dev loop reached max iterations without going green.");
+}
+
+fn run_foundation_model(prompt: &str) -> Option<String> {
+    let cmd = std::env::var("RINGTAIL_BASE_MODEL_CMD").ok()?;
+    if cmd.trim().is_empty() {
+        return None;
+    }
+    let out = Command::new("sh")
+        .arg("-lc")
+        .arg(cmd)
+        .env("RINGTAIL_PROMPT", prompt)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        eprintln!(
+            "Warning: foundation model command failed with status {:?}",
+            out.status.code()
+        );
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }
 
@@ -479,25 +573,88 @@ fn build_prompt_with_retrieval(
         return user_input.to_string();
     }
 
+    #[derive(Clone)]
+    struct RetrievalChunk {
+        path: String,
+        boundary: String,
+        content: String,
+        content_lc: String,
+    }
+
+    fn chunk_doc(doc: &CorpusDoc, max_chars: usize) -> Vec<RetrievalChunk> {
+        let mut starts = vec![0usize];
+        for (idx, _) in doc.content.match_indices("\nfn ") {
+            starts.push(idx + 1);
+        }
+        for (idx, _) in doc.content.match_indices("\nimpl ") {
+            starts.push(idx + 1);
+        }
+        for (idx, _) in doc.content.match_indices("\nmod ") {
+            starts.push(idx + 1);
+        }
+        starts.sort_unstable();
+        starts.dedup();
+
+        let mut chunks = Vec::new();
+        for w in starts.windows(2) {
+            let s = w[0];
+            let e = w[1];
+            if s >= e || s >= doc.content.len() {
+                continue;
+            }
+            let raw = &doc.content[s..e];
+            let snippet: String = raw.chars().take(max_chars.max(96)).collect();
+            let boundary = raw.lines().next().unwrap_or("").trim().to_string();
+            chunks.push(RetrievalChunk {
+                path: doc.path.clone(),
+                boundary,
+                content_lc: snippet.to_lowercase(),
+                content: snippet,
+            });
+        }
+        if let Some(&s) = starts.last() {
+            let raw = &doc.content[s..];
+            let snippet: String = raw.chars().take(max_chars.max(96)).collect();
+            chunks.push(RetrievalChunk {
+                path: doc.path.clone(),
+                boundary: raw.lines().next().unwrap_or("").trim().to_string(),
+                content_lc: snippet.to_lowercase(),
+                content: snippet,
+            });
+        }
+        if chunks.is_empty() {
+            chunks.push(RetrievalChunk {
+                path: doc.path.clone(),
+                boundary: "file".to_string(),
+                content: doc.content.chars().take(max_chars.max(96)).collect(),
+                content_lc: doc.content_lc.chars().take(max_chars.max(96)).collect(),
+            });
+        }
+        chunks
+    }
+
     let query_grams = char_trigrams(user_input);
-    let mut scored: Vec<(usize, f32)> = docs
+    let all_chunks: Vec<RetrievalChunk> = docs
+        .iter()
+        .flat_map(|d| chunk_doc(d, max_chars.saturating_mul(2)))
+        .collect();
+    let mut scored: Vec<(usize, f32)> = all_chunks
         .iter()
         .enumerate()
-        .filter_map(|(i, doc)| {
-            let path_lc = doc.path.to_lowercase();
+        .filter_map(|(i, ch)| {
+            let path_lc = ch.path.to_lowercase();
             let lexical = terms
                 .iter()
-                .map(|t| doc.content_lc.matches(t).count() + path_lc.matches(t).count() * 2)
+                .map(|t| {
+                    ch.content_lc.matches(t).count()
+                        + path_lc.matches(t).count() * 2
+                        + ch.boundary.to_lowercase().matches(t).count() * 3
+                })
                 .sum::<usize>();
-            let snippet: String = doc.content_lc.chars().take(max_chars.max(64)).collect();
-            let grams = char_trigrams(&(doc.path.clone() + " " + &snippet));
+            let grams = char_trigrams(&(ch.path.clone() + " " + &ch.content_lc));
             let semantic = jaccard_score(&query_grams, &grams);
-            let score = lexical as f32 + (semantic * 25.0);
-            if score > 0.0 {
-                Some((i, score))
-            } else {
-                None
-            }
+            let score = lexical as f32 + (semantic * 30.0);
+            (score > 0.0).then_some((i, score))
         })
         .collect();
 
@@ -510,14 +667,15 @@ fn build_prompt_with_retrieval(
     let mut prompt = String::new();
     prompt.push_str("<retrieved_context>\n");
     for (idx, score) in scored.into_iter().take(top_k.max(1)) {
-        let doc = &docs[idx];
-        let snippet: String = doc.content.chars().take(max_chars.max(64)).collect();
+        let ch = &all_chunks[idx];
         prompt.push_str("<context_file path=\"");
-        prompt.push_str(&doc.path);
+        prompt.push_str(&ch.path);
+        prompt.push_str("\" boundary=\"");
+        prompt.push_str(&ch.boundary);
         prompt.push_str("\" score=\"");
         prompt.push_str(&format!("{:.3}", score));
         prompt.push_str("\">\n");
-        prompt.push_str(&snippet);
+        prompt.push_str(&ch.content);
         prompt.push_str("\n</context_file>\n");
     }
     prompt.push_str("</retrieved_context>\n");
@@ -797,6 +955,7 @@ fn main() {
     println!("  /det on|off        toggle deterministic mode");
     println!("  /draft <task>      generate project layout + files (text only)");
     println!("  /scaffold <task>   generate and write files to generated/");
+    println!("  /devloop [n]       run cargo fmt/check/test/clippy loop");
     println!("  quit               exit\n");
 
     let stdin = io::stdin();
@@ -847,24 +1006,43 @@ fn main() {
             continue;
         }
 
+        if line.starts_with("/devloop") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let iterations = if parts.len() > 1 {
+                parts[1]
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .unwrap_or(1)
+            } else {
+                1
+            };
+            run_dev_loop(iterations);
+            continue;
+        }
+
         if let Some(task) = line.strip_prefix("/draft ") {
             let prompt = build_scaffold_prompt(task.trim(), &docs, retrieve_top_k, retrieve_chars);
-            let mut ctx = tokenizer::tokenize_bytes(&prompt);
-            if ctx.is_empty() {
-                ctx.push(0);
-            }
-            let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
+            let draft = run_foundation_model(&prompt).unwrap_or_else(|| {
+                let mut ctx = tokenizer::tokenize_bytes(&prompt);
+                if ctx.is_empty() {
+                    ctx.push(0);
+                }
+                model.generate(&ctx, scaffold_tokens, temperature, deterministic)
+            });
             println!("Bot draft:\n{}", draft);
             continue;
         }
 
         if let Some(task) = line.strip_prefix("/scaffold ") {
             let prompt = build_scaffold_prompt(task.trim(), &docs, retrieve_top_k, retrieve_chars);
-            let mut ctx = tokenizer::tokenize_bytes(&prompt);
-            if ctx.is_empty() {
-                ctx.push(0);
-            }
-            let draft = model.generate(&ctx, scaffold_tokens, temperature, deterministic);
+            let draft = run_foundation_model(&prompt).unwrap_or_else(|| {
+                let mut ctx = tokenizer::tokenize_bytes(&prompt);
+                if ctx.is_empty() {
+                    ctx.push(0);
+                }
+                model.generate(&ctx, scaffold_tokens, temperature, deterministic)
+            });
             match apply_scaffold(&draft, Path::new("generated")) {
                 Ok((d, f, skipped)) => {
                     println!(
@@ -881,13 +1059,16 @@ fn main() {
 
         // Generate reply with retrieval context from .txt corpus on every prompt.
         let prompt = build_prompt_with_retrieval(&line, &docs, retrieve_top_k, retrieve_chars);
-        let mut ctx = tokenizer::tokenize_bytes(&prompt);
-        if ctx.is_empty() {
-            ctx.push(0);
-        }
+        let reply = run_foundation_model(&prompt).unwrap_or_else(|| {
+            let mut ctx = tokenizer::tokenize_bytes(&prompt);
+            if ctx.is_empty() {
+                ctx.push(0);
+            }
 
-        let dynamic_tokens = ((line.len() / 8).clamp(reply_tokens_min, reply_tokens_max)) as usize;
-        let reply = model.generate(&ctx, dynamic_tokens, temperature, deterministic);
+            let dynamic_tokens =
+                ((line.len() / 8).clamp(reply_tokens_min, reply_tokens_max)) as usize;
+            model.generate(&ctx, dynamic_tokens, temperature, deterministic)
+        });
         println!("Bot: {}", reply);
     }
 }
