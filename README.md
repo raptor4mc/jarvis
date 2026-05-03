@@ -24,6 +24,7 @@ Recommended corpus shape:
 - `RINGTAIL_DATA_EXCLUDE`: optional comma-separated path substrings to ignore.
 - `RINGTAIL_MAX_TOKENS`: cap total training tokens.
 - `RINGTAIL_REPLY_TOKENS_MIN` / `RINGTAIL_REPLY_TOKENS_MAX`: generation bounds for normal chat.
+- `RINGTAIL_BASE_MODEL_CMD`: optional stronger inference command. Ferris passes the full prompt in `RINGTAIL_PROMPT` and uses command stdout as the model answer (fallback is local model).
 
 ## Training behavior
 - Uses micro-batches + grad accumulation.
