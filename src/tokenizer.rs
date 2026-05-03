@@ -5,7 +5,7 @@
 
 const BASE_VOCAB: usize = 256;
 
-const RUST_TOKENS: [&str; 137] = [
+const RUST_TOKENS: [&str; 141] = [
     "fn ",
     "let ",
     "mut ",
@@ -143,6 +143,49 @@ const RUST_TOKENS: [&str; 137] = [
     " => ",
     " -> ",
     "::",
+    " ",
+    "  ",
+    "    ",
+    "\t",
+];
+
+const IDENT_TOKENS: [&str; 36] = [
+    "tokio::sync::mpsc::channel",
+    "tokio::sync::mpsc",
+    "tokio::spawn",
+    "std::collections::HashMap",
+    "std::collections::HashSet",
+    "std::collections::BTreeMap",
+    "std::collections::BTreeSet",
+    "std::sync::Arc",
+    "std::rc::Rc",
+    "my_variable_name",
+    "my_function_call",
+    "crate::module::submodule::Type",
+    "'a",
+    "'static",
+    "println!",
+    "format!",
+    "vec!",
+    "todo!",
+    "debug_assert!",
+    "assert_eq!",
+    "assert_ne!",
+    "mod.rs",
+    "Cargo.toml",
+    "src/main.rs",
+    "src/lib.rs",
+    "Result<T, E>",
+    "Option<T>",
+    "Vec<T>",
+    "HashMap<K, V>",
+    "HashSet<T>",
+    "BTreeMap<K, V>",
+    "BTreeSet<T>",
+    "String::new",
+    "Vec::new",
+    "Iterator::collect",
+    "Self::new",
 ];
 
 const IDENT_TOKENS: [&str; 36] = [
