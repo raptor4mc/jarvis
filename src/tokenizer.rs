@@ -113,8 +113,11 @@ fn punct_table() -> HashMap<char, u32> {
 
 fn seeded_multi_tokens() -> Vec<String> {
     vec![
-        "::","..=","=>","->","==","!=","<=",">=","&&","||","+=","-=","*=","/=","%=","async fn",".await","async move","if let","while let",
-        "std::collections::HashMap","Vec<T>","Option<T>","Result<T, E>","collect::<Vec<_>>()","::<T>","#[derive(","#![","vec!","println!","assert_eq!","match","where T: Into<String>","T: Clone + Send","'static","'_","'a"
+        "::", "..=", "=>", "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=",
+        "async fn", ".await", "async move", "if let", "while let",
+        "std::collections::HashMap", "Vec<T>", "Option<T>", "Result<T, E>", "collect::<Vec<_>>()",
+        "::<T>", "#[derive(", "#![", "vec!", "println!", "assert_eq!", "match",
+        "where T: Into<String>", "T: Clone + Send", "'static", "'_", "'a",
     ].into_iter().map(|s| s.to_string()).collect()
 }
 
@@ -186,13 +189,48 @@ pub fn detokenize_bytes(tokens: &[i32]) -> String {
 
 #[cfg(test)]
 mod tests {
-use super::*;
+    use super::*;
 
-#[test] fn round_trip_bytes() { let s = "a\0b\x01c\n\t\r"; let t = encode(s); assert_eq!(decode(&t).unwrap(), s); }
-#[test] fn lifetimes() { let s = "fn f<'a>(x: &'a str) -> &'static str { x }"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn raw_strings() { let s = "let a = r#\"hi\"#; let b = r##\"yo\"##;"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn turbofish() { let s = "xs.iter().collect::<Vec<_>>()"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn macros_attrs() { let s = "#[derive(Debug)]\n#![allow(dead_code)]\nprintln!(\"x\");"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn comment_leading_ws() { let s = "//    TODO: keep\nlet x=1;"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn repeated_comma_segments() { let s = "Foo<A, A, A>"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+    #[test]
+    fn round_trip_bytes() {
+        let s = "a\0b\x01c\n\t\r";
+        let t = encode(s);
+        assert_eq!(decode(&t).unwrap(), s);
+    }
+
+    #[test]
+    fn lifetimes() {
+        let s = "fn f<'a>(x: &'a str) -> &'static str { x }";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn raw_strings() {
+        let s = "let a = r#\"hi\"#; let b = r##\"yo\"##;";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn turbofish() {
+        let s = "xs.iter().collect::<Vec<_>>()";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn macros_attrs() {
+        let s = "#[derive(Debug)]\n#![allow(dead_code)]\nprintln!(\"x\");";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn comment_leading_ws() {
+        let s = "//    TODO: keep\nlet x=1;";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn repeated_comma_segments() {
+        let s = "Foo<A, A, A>";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
 }
