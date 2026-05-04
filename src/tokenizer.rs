@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 const BYTE_VOCAB: u32 = 256;
 const PUNCT_START: u32 = 256;
 const MERGE_START: u32 = 512;
-const MAX_VOCAB: usize = 32_768;
+const MAX_VOCAB: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenizerError {
@@ -113,15 +113,18 @@ fn punct_table() -> HashMap<char, u32> {
 
 fn seeded_multi_tokens() -> Vec<String> {
     vec![
-        "::","..=","=>","->","==","!=","<=",">=","&&","||","+=","-=","*=","/=","%=","async fn",".await","async move","if let","while let",
-        "std::collections::HashMap","Vec<T>","Option<T>","Result<T, E>","collect::<Vec<_>>()","::<T>","#[derive(","#![","vec!","println!","assert_eq!","match","where T: Into<String>","T: Clone + Send","'static","'_","'a"
+        "::", "..=", "=>", "->", "==", "!=", "<=", ">=", "&&", "||", "+=", "-=", "*=", "/=", "%=",
+        "async fn", ".await", "async move", "if let", "while let",
+        "std::collections::HashMap", "Vec<T>", "Option<T>", "Result<T, E>", "collect::<Vec<_>>()",
+        "::<T>", "#[derive(", "#![", "vec!", "println!", "assert_eq!", "match",
+        "where T: Into<String>", "T: Clone + Send", "'static", "'_", "'a",
     ].into_iter().map(|s| s.to_string()).collect()
 }
 
 fn learned_merges_from_corpus() -> Vec<String> {
     let sample = include_str!("../README.md");
     let mut freq: HashMap<String, usize> = HashMap::new();
-    for n in 2..=8 {
+    for n in 2..=16 {
         for w in sample.as_bytes().windows(n) {
             if w.iter().all(|b| b.is_ascii_alphanumeric() || b"_<>:!?.=+-/()[]{} ,'\"".contains(b)) {
                 let s = String::from_utf8_lossy(w).to_string();
@@ -129,9 +132,9 @@ fn learned_merges_from_corpus() -> Vec<String> {
             }
         }
     }
-    let mut v: Vec<(String, usize)> = freq.into_iter().filter(|(_, c)| *c > 2).collect();
+    let mut v: Vec<(String, usize)> = freq.into_iter().filter(|(_, c)| *c > 1).collect();
     v.sort_by(|a,b| b.1.cmp(&a.1).then_with(|| b.0.len().cmp(&a.0.len())));
-    v.into_iter().take(6000).map(|(s,_)| s).collect()
+    v.into_iter().take(20_000).map(|(s,_)| s).collect()
 }
 
 fn tokenizer() -> &'static Tokenizer { static T: OnceLock<Tokenizer> = OnceLock::new(); T.get_or_init(Tokenizer::new) }
@@ -186,13 +189,48 @@ pub fn detokenize_bytes(tokens: &[i32]) -> String {
 
 #[cfg(test)]
 mod tests {
-use super::*;
+    use super::*;
 
-#[test] fn round_trip_bytes() { let s = "a\0b\x01c\n\t\r"; let t = encode(s); assert_eq!(decode(&t).unwrap(), s); }
-#[test] fn lifetimes() { let s = "fn f<'a>(x: &'a str) -> &'static str { x }"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn raw_strings() { let s = "let a = r#\"hi\"#; let b = r##\"yo\"##;"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn turbofish() { let s = "xs.iter().collect::<Vec<_>>()"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn macros_attrs() { let s = "#[derive(Debug)]\n#![allow(dead_code)]\nprintln!(\"x\");"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn comment_leading_ws() { let s = "//    TODO: keep\nlet x=1;"; assert_eq!(decode(&encode(s)).unwrap(), s); }
-#[test] fn repeated_comma_segments() { let s = "Foo<A, A, A>"; assert_eq!(decode(&encode(s)).unwrap(), s); }
+    #[test]
+    fn round_trip_bytes() {
+        let s = "a\0b\x01c\n\t\r";
+        let t = encode(s);
+        assert_eq!(decode(&t).unwrap(), s);
+    }
+
+    #[test]
+    fn lifetimes() {
+        let s = "fn f<'a>(x: &'a str) -> &'static str { x }";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn raw_strings() {
+        let s = "let a = r#\"hi\"#; let b = r##\"yo\"##;";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn turbofish() {
+        let s = "xs.iter().collect::<Vec<_>>()";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn macros_attrs() {
+        let s = "#[derive(Debug)]\n#![allow(dead_code)]\nprintln!(\"x\");";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn comment_leading_ws() {
+        let s = "//    TODO: keep\nlet x=1;";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
+
+    #[test]
+    fn repeated_comma_segments() {
+        let s = "Foo<A, A, A>";
+        assert_eq!(decode(&encode(s)).unwrap(), s);
+    }
 }
