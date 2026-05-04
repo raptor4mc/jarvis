@@ -10,6 +10,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -21,11 +22,18 @@ fn idx2d(r: usize, c: usize, cols: usize) -> usize {
 /// Xavier-style random init matching C++ `rand_weight()`
 #[inline]
 fn rand_weight() -> f32 {
-    // Simple LCG so we don't need an external crate.
-    // For better randomness you can swap in `rand` crate later.
     use std::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(12345678901234567);
-    let s = STATE.fetch_add(6364136223846793005, Ordering::Relaxed);
+    static STATE: AtomicU64 = AtomicU64::new(0);
+    let mut s = STATE.load(Ordering::Relaxed);
+    if s == 0 {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9E37_79B9_7F4A_7C15)
+            ^ ((&STATE as *const AtomicU64 as usize) as u64);
+        let _ = STATE.compare_exchange(0, seed, Ordering::Relaxed, Ordering::Relaxed);
+    }
+    s = STATE.fetch_add(6364136223846793005, Ordering::Relaxed);
     let f = ((s >> 33) as f32) / (u32::MAX as f32); // 0..1
     (f - 0.5) / 5.0
 }
@@ -463,7 +471,14 @@ impl ChatModel {
             return;
         }
 
-        let batch_size = snap_batch_size(batch_size.max(1));
+        let requested_batch_size = batch_size.max(1);
+        let batch_size = snap_batch_size(requested_batch_size);
+        if batch_size != requested_batch_size {
+            println!(
+                "Requested batch size {} snapped to supported micro-batch {}",
+                requested_batch_size, batch_size
+            );
+        }
         let sample_stride = sample_stride.max(1);
 
         let sample_starts: Vec<usize> = (0..data.len() - t).step_by(sample_stride).collect();
@@ -518,7 +533,15 @@ impl ChatModel {
         let mut am_wout = AdamState::new(vocab * d);
         let mut am_bout = AdamState::new(vocab);
 
+        let mut train_starts = train_starts.to_vec();
         for ep in 0..epochs {
+            // deterministic in-place shuffle with epoch-varying seed
+            let mut state = (ep as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            for i in (1..train_starts.len()).rev() {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let j = (state as usize) % (i + 1);
+                train_starts.swap(i, j);
+            }
             let mut total_loss = 0.0f32;
 
             // Accumulated gradient buffers
@@ -810,11 +833,30 @@ impl ChatModel {
                         *v *= inv;
                     }
 
+                    // clip per-parameter tensor grads before optimizer update
+                    clip_grad_norm(&mut g_token_emb, 1.0);
+                    clip_grad_norm(&mut g_pos_emb, 1.0);
+                    clip_grad_norm(&mut g_wq, 1.0);
+                    clip_grad_norm(&mut g_wk, 1.0);
+                    clip_grad_norm(&mut g_wv, 1.0);
+                    clip_grad_norm(&mut g_wo, 1.0);
+                    clip_grad_norm(&mut g_wff1, 1.0);
+                    clip_grad_norm(&mut g_bff1, 1.0);
+                    clip_grad_norm(&mut g_wff2, 1.0);
+                    clip_grad_norm(&mut g_bff2, 1.0);
+                    clip_grad_norm(&mut g_ln1g, 1.0);
+                    clip_grad_norm(&mut g_ln1b, 1.0);
+                    clip_grad_norm(&mut g_ln2g, 1.0);
+                    clip_grad_norm(&mut g_ln2b, 1.0);
+                    clip_grad_norm(&mut g_wout, 1.0);
+                    clip_grad_norm(&mut g_bout, 1.0);
+
                     // Adam updates
+                    let lr_t = lr * (1.0 - (ep as f32 / epochs.max(1) as f32)).max(0.1);
                     am_token_emb.update(
                         &mut self.token_emb,
                         &g_token_emb,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -823,20 +865,20 @@ impl ChatModel {
                     am_pos_emb.update(
                         &mut self.pos_emb,
                         &g_pos_emb,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
                         adam_eps,
                     );
-                    am_wq.update(&mut self.wq, &g_wq, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wk.update(&mut self.wk, &g_wk, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wv.update(&mut self.wv, &g_wv, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
-                    am_wo.update(&mut self.wo, &g_wo, lr, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    am_wq.update(&mut self.wq, &g_wq, lr_t, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    am_wk.update(&mut self.wk, &g_wk, lr_t, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    am_wv.update(&mut self.wv, &g_wv, lr_t, adam_step, adam_beta1, adam_beta2, adam_eps);
+                    am_wo.update(&mut self.wo, &g_wo, lr_t, adam_step, adam_beta1, adam_beta2, adam_eps);
                     am_wff1.update(
                         &mut self.wff1,
                         &g_wff1,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -845,7 +887,7 @@ impl ChatModel {
                     am_bff1.update(
                         &mut self.bff1,
                         &g_bff1,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -854,7 +896,7 @@ impl ChatModel {
                     am_wff2.update(
                         &mut self.wff2,
                         &g_wff2,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -863,7 +905,7 @@ impl ChatModel {
                     am_bff2.update(
                         &mut self.bff2,
                         &g_bff2,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -872,7 +914,7 @@ impl ChatModel {
                     am_ln1g.update(
                         &mut self.ln1_gamma,
                         &g_ln1g,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -881,7 +923,7 @@ impl ChatModel {
                     am_ln1b.update(
                         &mut self.ln1_beta,
                         &g_ln1b,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -890,7 +932,7 @@ impl ChatModel {
                     am_ln2g.update(
                         &mut self.ln2_gamma,
                         &g_ln2g,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -899,7 +941,7 @@ impl ChatModel {
                     am_ln2b.update(
                         &mut self.ln2_beta,
                         &g_ln2b,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -908,7 +950,7 @@ impl ChatModel {
                     am_wout.update(
                         &mut self.wout,
                         &g_wout,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
@@ -917,7 +959,7 @@ impl ChatModel {
                     am_bout.update(
                         &mut self.bout,
                         &g_bout,
-                        lr,
+                        lr_t,
                         adam_step,
                         adam_beta1,
                         adam_beta2,
