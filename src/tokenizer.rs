@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 const BYTE_VOCAB: u32 = 256;
 const PUNCT_START: u32 = 256;
 const MERGE_START: u32 = 512;
-const MAX_VOCAB: usize = 32_768;
+const MAX_VOCAB: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenizerError {
@@ -124,7 +124,7 @@ fn seeded_multi_tokens() -> Vec<String> {
 fn learned_merges_from_corpus() -> Vec<String> {
     let sample = include_str!("../README.md");
     let mut freq: HashMap<String, usize> = HashMap::new();
-    for n in 2..=8 {
+    for n in 2..=16 {
         for w in sample.as_bytes().windows(n) {
             if w.iter().all(|b| b.is_ascii_alphanumeric() || b"_<>:!?.=+-/()[]{} ,'\"".contains(b)) {
                 let s = String::from_utf8_lossy(w).to_string();
@@ -132,9 +132,9 @@ fn learned_merges_from_corpus() -> Vec<String> {
             }
         }
     }
-    let mut v: Vec<(String, usize)> = freq.into_iter().filter(|(_, c)| *c > 2).collect();
+    let mut v: Vec<(String, usize)> = freq.into_iter().filter(|(_, c)| *c > 1).collect();
     v.sort_by(|a,b| b.1.cmp(&a.1).then_with(|| b.0.len().cmp(&a.0.len())));
-    v.into_iter().take(6000).map(|(s,_)| s).collect()
+    v.into_iter().take(20_000).map(|(s,_)| s).collect()
 }
 
 fn tokenizer() -> &'static Tokenizer { static T: OnceLock<Tokenizer> = OnceLock::new(); T.get_or_init(Tokenizer::new) }
